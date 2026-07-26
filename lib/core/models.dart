@@ -371,6 +371,38 @@ class AppData {
   });
 }
 
+class PendingDelete {
+  final String id;
+  final String resource;
+  final String? resourceType;
+  final String? secondaryId;
+  final String updatedAt;
+
+  const PendingDelete({
+    required this.id,
+    required this.resource,
+    this.resourceType,
+    this.secondaryId,
+    required this.updatedAt,
+  });
+
+  factory PendingDelete.fromMap(Map<String, dynamic> m) => PendingDelete(
+        id: m['id'] as String,
+        resource: m['resource'] as String,
+        resourceType: m['resourceType'] as String?,
+        secondaryId: m['secondaryId'] as String?,
+        updatedAt: m['updatedAt'] as String,
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'resource': resource,
+        'resourceType': resourceType,
+        'secondaryId': secondaryId,
+        'updatedAt': updatedAt,
+      };
+}
+
 class ActivityTemplate {
   final String id;
   final String title;

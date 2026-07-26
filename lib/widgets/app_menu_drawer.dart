@@ -14,6 +14,7 @@ class AppMenuDrawer extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final c = AppTheme.colorsOf(context);
     final username = ref.watch(configProvider.select((cfg) => cfg.username));
+    final pendingCount = ref.watch(pendingSyncCountProvider);
     final title =
         username.trim().isEmpty ? 'Personal Dashboard' : username.trim();
     return Drawer(
@@ -111,6 +112,17 @@ class AppMenuDrawer extends ConsumerWidget {
               c: c,
             ),
             _MenuTile(
+              icon: Icons.sync_outlined,
+              selectedIcon: Icons.sync_rounded,
+              label: 'Pending Sync',
+              route: '/pending-sync',
+              selected: currentPath.startsWith('/pending-sync'),
+              c: c,
+              trailing: pendingCount > 0
+                  ? _CountBadge(count: pendingCount, c: c)
+                  : null,
+            ),
+            _MenuTile(
               icon: Icons.settings_outlined,
               selectedIcon: Icons.settings_rounded,
               label: 'Settings',
@@ -132,6 +144,7 @@ class _MenuTile extends StatelessWidget {
   final String route;
   final bool selected;
   final AppColors c;
+  final Widget? trailing;
 
   const _MenuTile({
     required this.icon,
@@ -140,6 +153,7 @@ class _MenuTile extends StatelessWidget {
     required this.route,
     required this.selected,
     required this.c,
+    this.trailing,
   });
 
   @override
@@ -147,6 +161,7 @@ class _MenuTile extends StatelessWidget {
     final color = selected ? c.ink : c.muted;
     return ListTile(
       leading: Icon(selected ? selectedIcon : icon, color: color),
+      trailing: trailing,
       title: Text(
         label,
         style: TextStyle(
@@ -162,6 +177,32 @@ class _MenuTile extends StatelessWidget {
         Navigator.pop(context);
         if (!selected) context.go(route);
       },
+    );
+  }
+}
+
+class _CountBadge extends StatelessWidget {
+  final int count;
+  final AppColors c;
+
+  const _CountBadge({required this.count, required this.c});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: c.neg.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        '$count',
+        style: TextStyle(
+          color: c.neg,
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
     );
   }
 }

@@ -18,6 +18,7 @@ import 'screens/insulin_shell.dart';
 import 'screens/login_screen.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/api_log_screen.dart';
+import 'screens/pending_sync_screen.dart';
 import 'theme/app_theme.dart';
 import 'providers/providers.dart';
 import 'core/config.dart';
@@ -74,6 +75,9 @@ final _router = GoRouter(
             builder: (c, s) => const RoutineTransactionScreen()),
         GoRoute(path: '/settings', builder: (c, s) => const SettingsScreen()),
         GoRoute(path: '/api-log', builder: (c, s) => const ApiLogScreen()),
+        GoRoute(
+            path: '/pending-sync',
+            builder: (c, s) => const PendingSyncScreen()),
       ],
     ),
     GoRoute(

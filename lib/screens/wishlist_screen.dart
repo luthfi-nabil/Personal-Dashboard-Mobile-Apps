@@ -33,7 +33,8 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
     );
   }
 
-  List<Widget> _pageHeader(BuildContext context, AppData data, AppConfig cfg, AppColors c) {
+  List<Widget> _pageHeader(
+      BuildContext context, AppData data, AppConfig cfg, AppColors c) {
     return [
       const SizedBox(height: 14),
       Row(
@@ -41,9 +42,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
           Expanded(
             child: Text('Planned Expenses',
                 style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w700,
-                    color: c.ink)),
+                    fontSize: 28, fontWeight: FontWeight.w700, color: c.ink)),
           ),
           if (_tab == 0)
             TextButton.icon(
@@ -65,13 +64,12 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
     ];
   }
 
-  Widget _buildListView(BuildContext context, AppData data, AppConfig cfg, AppColors c) {
-    final active = data.wishlistItems
-        .where((item) => item.status == 'active')
-        .toList();
-    final history = data.wishlistItems
-        .where((item) => item.status != 'active')
-        .toList();
+  Widget _buildListView(
+      BuildContext context, AppData data, AppConfig cfg, AppColors c) {
+    final active =
+        data.wishlistItems.where((item) => item.status == 'active').toList();
+    final history =
+        data.wishlistItems.where((item) => item.status != 'active').toList();
     final fulfilled = data.wishlistItems
         .where((item) => item.status == 'fulfilled')
         .toList()
@@ -86,8 +84,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
         .fold<double>(0, (sum, item) => sum + item.price);
     final fulfilledTotal = fulfilled.fold<double>(
         0, (sum, item) => sum + (item.fulfilledPrice ?? item.price));
-    final highPriority =
-        active.where((item) => item.priority == 'high').length;
+    final highPriority = active.where((item) => item.priority == 'high').length;
     final avgFulfilled =
         fulfilled.isEmpty ? 0.0 : fulfilledTotal / fulfilled.length;
     final prioritySummary = _prioritySummary(active);
@@ -122,6 +119,12 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
                 currency: cfg.currency,
                 c: c,
                 onFulfill: () => _openFulfillDialog(context, item, data),
+                onPartialPayment: () => _openFulfillDialog(
+                  context,
+                  item,
+                  data,
+                  partialPayment: true,
+                ),
                 onCancel: () => _cancel(context, item),
                 onRemove: () => _remove(context, item),
               )),
@@ -129,14 +132,14 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
         _SectionTitle('History (${history.length})', c),
         const SizedBox(height: 10),
         if (history.isEmpty)
-          _EmptyPanel(
-              c: c, text: 'Fulfilled and canceled plans appear here.')
+          _EmptyPanel(c: c, text: 'Fulfilled and canceled plans appear here.')
         else
           ...history.map((item) => _WishlistCard(
                 item: item,
                 currency: cfg.currency,
                 c: c,
                 onFulfill: null,
+                onPartialPayment: null,
                 onCancel: null,
                 onRemove: () => _remove(context, item),
               )),
@@ -144,16 +147,15 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
     );
   }
 
-  Widget _buildCategoryView(BuildContext context, AppData data, AppConfig cfg, AppColors c) {
-    final plannedCats = data.categories
-        .where((cat) => cat.kind == 'planned_expense')
-        .toList();
-    final active = data.wishlistItems
-        .where((item) => item.status == 'active')
-        .toList();
+  Widget _buildCategoryView(
+      BuildContext context, AppData data, AppConfig cfg, AppColors c) {
+    final plannedCats =
+        data.categories.where((cat) => cat.kind == 'planned_expense').toList();
+    final active =
+        data.wishlistItems.where((item) => item.status == 'active').toList();
 
-    final catTotals =
-        <String, ({double total, double spending, double earning, int count})>{};
+    final catTotals = <String,
+        ({double total, double spending, double earning, int count})>{};
     for (final item in active) {
       final catName = (item.categoryName ?? '').trim().isEmpty
           ? 'Uncategorized'
@@ -272,8 +274,8 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
                       Container(
                         width: 8,
                         height: 8,
-                        decoration: BoxDecoration(
-                            color: color, shape: BoxShape.circle),
+                        decoration:
+                            BoxDecoration(color: color, shape: BoxShape.circle),
                       ),
                       const SizedBox(width: 6),
                       Text(cat.name,
@@ -345,8 +347,18 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
   }
 
   Future<void> _openFulfillDialog(
-      BuildContext context, WishlistItem item, AppData data) async {
-    final priceCtl = TextEditingController();
+    BuildContext context,
+    WishlistItem item,
+    AppData data, {
+    bool partialPayment = false,
+  }) async {
+    final defaultPrice = partialPayment ? item.price / 2 : item.price;
+    final defaultPriceText = defaultPrice == defaultPrice.roundToDouble()
+        ? defaultPrice.toStringAsFixed(0)
+        : defaultPrice.toStringAsFixed(2);
+    final priceCtl = TextEditingController(
+      text: partialPayment ? defaultPriceText : '',
+    );
     String sourceName = '';
     String categoryId = '';
     final categoryKind =
@@ -358,7 +370,8 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (ctx, setS) => AlertDialog(
-          title: Text('Fulfill planned expense',
+          title: Text(
+              partialPayment ? 'Partial payment' : 'Fulfill planned expense',
               style: TextStyle(
                   color: AppTheme.colorsOf(ctx).ink,
                   fontSize: 20,
@@ -376,10 +389,21 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
                     FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
                   ],
                   decoration: InputDecoration(
-                    labelText: 'Final price',
-                    hintText: item.price.toStringAsFixed(0),
+                    labelText:
+                        partialPayment ? 'Payment amount' : 'Final price',
+                    hintText: defaultPriceText,
                   ),
                   style: TextStyle(color: AppTheme.colorsOf(ctx).ink),
+                  validator: (v) {
+                    final price =
+                        double.tryParse((v ?? '').replaceAll(',', '.')) ??
+                            item.price;
+                    if (price <= 0) return 'Must be greater than zero';
+                    if (partialPayment && price >= item.price) {
+                      return 'Must be less than planned amount';
+                    }
+                    return null;
+                  },
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
@@ -390,8 +414,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
                           DropdownMenuItem(value: s.name, child: Text(s.name)))
                       .toList(),
                   onChanged: (v) => setS(() => sourceName = v ?? ''),
-                  validator: (v) =>
-                      v == null || v.isEmpty ? 'Required' : null,
+                  validator: (v) => v == null || v.isEmpty ? 'Required' : null,
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
@@ -404,8 +427,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
                           value: cat.id, child: Text(cat.name)))
                       .toList(),
                   onChanged: (v) => setS(() => categoryId = v ?? ''),
-                  validator: (v) =>
-                      v == null || v.isEmpty ? 'Required' : null,
+                  validator: (v) => v == null || v.isEmpty ? 'Required' : null,
                 ),
               ],
             ),
@@ -420,7 +442,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
                   Navigator.pop(dialogContext, true);
                 }
               },
-              child: const Text('Submit'),
+              child: Text(partialPayment ? 'Pay' : 'Submit'),
             ),
           ],
         ),
@@ -432,8 +454,15 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
     final source = data.sources.firstWhere((s) => s.name == sourceName);
     final category =
         financeCategories.firstWhere((cat) => cat.id == categoryId);
-    final savedLocally = await Repo.instance.fulfillWishlistItem(
-        item: item, price: price, category: category, source: source);
+    final savedLocally = partialPayment
+        ? await Repo.instance.partialPayWishlistItem(
+            item: item,
+            price: price,
+            category: category,
+            source: source,
+          )
+        : await Repo.instance.fulfillWishlistItem(
+            item: item, price: price, category: category, source: source);
     await ref.read(appDataProvider.notifier).refresh();
     if (context.mounted && savedLocally) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -601,20 +630,17 @@ class _CategoryValueCard extends StatelessWidget {
               Container(
                 width: 10,
                 height: 10,
-                decoration:
-                    BoxDecoration(color: color, shape: BoxShape.circle),
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
               ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(name,
-                    style: TextStyle(
-                        fontWeight: FontWeight.w700, color: c.ink)),
+                    style:
+                        TextStyle(fontWeight: FontWeight.w700, color: c.ink)),
               ),
               Text(fmtRp(total, currency),
                   style: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14,
-                      color: c.ink)),
+                      fontWeight: FontWeight.w700, fontSize: 14, color: c.ink)),
             ],
           ),
           const SizedBox(height: 6),
@@ -760,6 +786,7 @@ class _WishlistCard extends StatelessWidget {
   final String currency;
   final AppColors c;
   final VoidCallback? onFulfill;
+  final VoidCallback? onPartialPayment;
   final VoidCallback? onCancel;
   final VoidCallback onRemove;
 
@@ -768,6 +795,7 @@ class _WishlistCard extends StatelessWidget {
     required this.currency,
     required this.c,
     required this.onFulfill,
+    required this.onPartialPayment,
     required this.onCancel,
     required this.onRemove,
   });
@@ -833,12 +861,16 @@ class _WishlistCard extends StatelessWidget {
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'fulfill') onFulfill?.call();
+              if (value == 'partial') onPartialPayment?.call();
               if (value == 'cancel') onCancel?.call();
               if (value == 'remove') onRemove();
             },
             itemBuilder: (_) => [
               if (onFulfill != null)
                 const PopupMenuItem(value: 'fulfill', child: Text('Fulfill')),
+              if (onPartialPayment != null)
+                const PopupMenuItem(
+                    value: 'partial', child: Text('Partial payment')),
               if (onCancel != null)
                 const PopupMenuItem(value: 'cancel', child: Text('Cancel')),
               const PopupMenuItem(value: 'remove', child: Text('Remove')),
@@ -1071,8 +1103,8 @@ class _PlannedCategoryEditorSheetState
       ),
     );
     if (confirmed != true || !mounted) return;
-    await Repo.instance.deleteCategory(
-        id: widget.category!.id, kind: widget.category!.kind);
+    await Repo.instance
+        .deleteCategory(id: widget.category!.id, kind: widget.category!.kind);
     await widget.onSaved();
     if (mounted) Navigator.pop(context);
   }
@@ -1095,9 +1127,7 @@ class _PlannedCategoryEditorSheetState
                       ? 'Edit category'
                       : 'Add planned category',
                   style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w700,
-                      color: c.ink)),
+                      fontSize: 20, fontWeight: FontWeight.w700, color: c.ink)),
               const Spacer(),
               IconButton(
                   onPressed: () => Navigator.pop(context),

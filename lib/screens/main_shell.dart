@@ -27,7 +27,8 @@ class MainShell extends ConsumerWidget {
       currentIndex = 2;
     } else if (location.startsWith('/options')) {
       currentIndex = 3;
-    } else if (location.startsWith('/activities')) {
+    } else if (location.startsWith('/activities') ||
+        location.startsWith('/pending-sync')) {
       currentIndex = -1;
     }
 
@@ -136,7 +137,9 @@ class _TopBar extends StatelessWidget {
             ),
           ),
           GestureDetector(
-            onTap: () => context.go('/settings'),
+            onTap: () => context.go(
+              pendingCount > 0 ? '/pending-sync' : '/settings',
+            ),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(

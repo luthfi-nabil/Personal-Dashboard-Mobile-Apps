@@ -146,16 +146,16 @@ class _InsulinScreenState extends ConsumerState<InsulinScreen> {
   Future<void> _deleteAssign(InsulinAssign a) async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: const Text('Delete batch?'),
         content:
             Text('This removes batch "${a.batchNo}" and its usage history.'),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context, false),
+              onPressed: () => Navigator.pop(dialogContext, false),
               child: const Text('Cancel')),
           TextButton(
-              onPressed: () => Navigator.pop(context, true),
+              onPressed: () => Navigator.pop(dialogContext, true),
               child: const Text('Delete')),
         ],
       ),
@@ -163,6 +163,32 @@ class _InsulinScreenState extends ConsumerState<InsulinScreen> {
     if (confirmed != true) return;
     try {
       await Repo.instance.deleteInsulinAssign(a.id);
+      await _refresh();
+    } catch (e) {
+      if (mounted) _showError(e);
+    }
+  }
+
+  Future<void> _deleteUsage(_UsageRow row) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete usage?'),
+        content: Text(
+            'This removes ${_fmtNum(row.usage.units)} units logged for ${row.itemName}.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await Repo.instance.deleteInsulinUsage(row.usage);
       await _refresh();
     } catch (e) {
       if (mounted) _showError(e);
@@ -429,7 +455,11 @@ class _InsulinScreenState extends ConsumerState<InsulinScreen> {
               else
                 ...usageRows.take(12).map((row) => Padding(
                       padding: const EdgeInsets.only(bottom: 8),
-                      child: _UsageTile(row: row, c: c),
+                      child: _UsageTile(
+                        row: row,
+                        c: c,
+                        onDelete: () => _deleteUsage(row),
+                      ),
                     )),
             ],
           ],
@@ -865,8 +895,9 @@ class _UsageByItemRow extends StatelessWidget {
 class _UsageTile extends StatelessWidget {
   final _UsageRow row;
   final AppColors c;
+  final VoidCallback? onDelete;
 
-  const _UsageTile({required this.row, required this.c});
+  const _UsageTile({required this.row, required this.c, this.onDelete});
 
   @override
   Widget build(BuildContext context) {
@@ -911,6 +942,15 @@ class _UsageTile extends StatelessWidget {
             style: TextStyle(
                 fontSize: 18, fontWeight: FontWeight.w700, color: c.ink),
           ),
+          if (onDelete != null) ...[
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: onDelete,
+              icon: const Icon(Icons.delete_outline_rounded),
+              color: c.neg,
+              tooltip: 'Delete usage',
+            ),
+          ],
         ],
       ),
     );
@@ -1163,7 +1203,7 @@ class _InsulinAssignSheetState extends ConsumerState<_InsulinAssignSheet> {
             ]),
             const SizedBox(height: 16),
             DropdownButtonFormField<String>(
-              value: _itemId,
+              initialValue: _itemId,
               decoration: const InputDecoration(labelText: 'Insulin type'),
               items: widget.items
                   .map(
@@ -1309,7 +1349,7 @@ class _InsulinUsageByItemSheetState
             ]),
             const SizedBox(height: 16),
             DropdownButtonFormField<String>(
-              value: _itemId,
+              initialValue: _itemId,
               decoration: const InputDecoration(labelText: 'Insulin'),
               items: widget.items
                   .map((item) =>
@@ -1321,7 +1361,8 @@ class _InsulinUsageByItemSheetState
             ),
             const SizedBox(height: 14),
             DropdownButtonFormField<String>(
-              value: _assignId,
+              key: ValueKey(_itemId),
+              initialValue: _assignId,
               decoration: const InputDecoration(labelText: 'Batch'),
               items: assigns
                   .map((assign) => DropdownMenuItem(

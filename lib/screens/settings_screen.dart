@@ -98,6 +98,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final c = AppTheme.colorsOf(context);
     final cfg = ref.watch(configProvider);
     final dataAsync = ref.watch(appDataProvider);
+    final pendingCount = ref.watch(pendingSyncCountProvider);
 
     return dataAsync.when(
       loading: () => Center(child: CircularProgressIndicator(color: c.accent)),
@@ -202,7 +203,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  Row(
+                  Wrap(
+                    spacing: 16,
+                    runSpacing: 4,
                     children: [
                       TextButton.icon(
                         onPressed: () => context.push('/server-settings'),
@@ -214,7 +217,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             padding: EdgeInsets.zero,
                             minimumSize: const Size(0, 32)),
                       ),
-                      const SizedBox(width: 16),
+                      TextButton.icon(
+                        onPressed: () => context.push('/pending-sync'),
+                        icon: Icon(Icons.sync_outlined,
+                            size: 16, color: c.accent),
+                        label: Text(
+                            pendingCount > 0
+                                ? 'Pending sync ($pendingCount)'
+                                : 'Pending sync',
+                            style: TextStyle(color: c.accent)),
+                        style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            minimumSize: const Size(0, 32)),
+                      ),
                       TextButton.icon(
                         onPressed: () => context.push('/api-log'),
                         icon: Icon(Icons.network_check,

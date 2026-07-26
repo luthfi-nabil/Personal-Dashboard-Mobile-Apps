@@ -282,6 +282,9 @@ class RemoteApi {
       }) as Map);
 
   // ── transaction-api: spendings ─────────────────────────────────────────
+  Future<void> deleteEarning(String id) async =>
+      _delete(_txnUri('/earnings/$id'));
+
   Future<List<Map<String, dynamic>>> getSpendings() async =>
       _list(await _get(_txnUri('/spendings')));
 
@@ -304,6 +307,9 @@ class RemoteApi {
 
   // ── health-api: insulin items ──────────────────────────────────────────
   // Planned expenses
+  Future<void> deleteSpending(String id) async =>
+      _delete(_txnUri('/spendings/$id'));
+
   Future<List<Map<String, dynamic>>> getPlannedExpenses() async =>
       _list(await _get(_txnUri('/planned-expenses')));
 
@@ -480,6 +486,9 @@ class RemoteApi {
       }) as Map);
 
   // ── health-api: blood sugar ───────────────────────────────────────────
+  Future<void> deleteInsulinUsage(String id) async =>
+      _delete(_healthUri('/insulin-usage/$id'));
+
   Future<List<Map<String, dynamic>>> getBloodSugarLogs() async =>
       _list(await _get(_healthUri('/blood-sugar')));
 

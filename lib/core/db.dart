@@ -14,6 +14,7 @@ const _userScopedTables = [
   'activity_categories',
   'activity_templates',
   'daily_activities',
+  'pending_deletes',
   'insulin_items',
   'insulin_assigns',
   'insulin_usages',
@@ -41,7 +42,7 @@ class AppDb {
     _db = await factory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 13,
+        version: 14,
         onCreate: (db, _) async {
           await db.execute('''CREATE TABLE sources (
             id TEXT NOT NULL,
@@ -129,6 +130,7 @@ class AppDb {
             key TEXT PRIMARY KEY,
             value TEXT
           )''');
+          await _createPendingDeletesTable(db);
           await db.execute('''CREATE TABLE insulin_items (
             id TEXT NOT NULL,
             name TEXT NOT NULL,
@@ -263,6 +265,9 @@ class AppDb {
             await _addColumnIfMissing(
                 db, 'activity_categories', "updatedAt TEXT DEFAULT ''");
           }
+          if (oldVersion < 14) {
+            await _createPendingDeletesTable(db);
+          }
         },
       ),
     );
@@ -344,6 +349,29 @@ class AppDb {
         orderBy: 'date ASC');
     return rows.map(Transaction.fromMap).toList();
   }
+
+  // Delete queue
+  Future<void> putPendingDelete(PendingDelete item, String userId) async {
+    await _ensurePendingDeletesTable();
+    await _db.insert('pending_deletes', {...item.toMap(), 'userId': userId},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<PendingDelete>> getPendingDeletes(String userId) async {
+    await _ensurePendingDeletesTable();
+    final rows = await _db.query('pending_deletes',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'updatedAt ASC');
+    return rows.map(PendingDelete.fromMap).toList();
+  }
+
+  Future<void> deletePendingDelete(PendingDelete item, String userId) async {
+    await _ensurePendingDeletesTable();
+    await _db.delete('pending_deletes',
+        where: 'id = ? AND resource = ? AND userId = ?',
+        whereArgs: [item.id, item.resource, userId]);
+  }
+
+  Future<void> _ensurePendingDeletesTable() => _createPendingDeletesTable(_db);
 
   // ── Meta ───────────────────────────────────────────────────────────
   // Wishlist
@@ -637,10 +665,26 @@ class AppDb {
   /// offline-created transaction isn't wiped out before it's synced.
   Future<void> replaceTransactions(
       List<Transaction> items, String userId) async {
+    final pendingDeletes = await getPendingDeletes(userId);
+    final deletedIds = pendingDeletes
+        .where((item) => item.resource == 'transaction')
+        .expand((item) =>
+            [item.id, if (item.secondaryId != null) item.secondaryId!])
+        .toSet();
     await _db.transaction((txn) async {
       await txn.delete('transactions',
           where: "userId = ? AND syncState != 'pending'", whereArgs: [userId]);
       for (final t in items) {
+        if (t.type == 'transfer') {
+          final parts = t.id.split('_');
+          final firstId = parts.first;
+          final secondId = parts.length > 1 ? parts.sublist(1).join('_') : '';
+          if (deletedIds.contains(firstId) || deletedIds.contains(secondId)) {
+            continue;
+          }
+        } else if (deletedIds.contains(t.id)) {
+          continue;
+        }
         await txn.insert('transactions', {...t.toMap(), 'userId': userId},
             conflictAlgorithm: ConflictAlgorithm.replace);
       }
@@ -712,10 +756,16 @@ class AppDb {
   // ── Bulk ───────────────────────────────────────────────────────────
   Future<void> replaceInsulinUsages(
       List<InsulinUsage> items, String userId) async {
+    final pendingDeletes = await getPendingDeletes(userId);
+    final deletedIds = pendingDeletes
+        .where((item) => item.resource == 'insulin_usage')
+        .map((item) => item.id)
+        .toSet();
     await _db.transaction((txn) async {
       await txn.delete('insulin_usages',
           where: "userId = ? AND syncState != 'pending'", whereArgs: [userId]);
       for (final u in items) {
+        if (deletedIds.contains(u.id)) continue;
         await txn.insert('insulin_usages', {...u.toMap(), 'userId': userId},
             conflictAlgorithm: ConflictAlgorithm.replace);
       }
@@ -743,6 +793,7 @@ class AppDb {
       getPendingWishlistItems(userId),
       getPendingRoutineTransactions(userId),
       getPendingRoutinePayments(userId),
+      getPendingDeletes(userId),
       getPendingInsulinItems(userId),
       getPendingInsulinAssigns(userId),
       getPendingInsulinUsages(userId),
@@ -949,6 +1000,18 @@ Future<void> _createActivityTables(Database db) async {
     doneAt TEXT NOT NULL,
     userId TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (id, userId)
+  )''');
+}
+
+Future<void> _createPendingDeletesTable(Database db) async {
+  await db.execute('''CREATE TABLE IF NOT EXISTS pending_deletes (
+    id TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    resourceType TEXT,
+    secondaryId TEXT,
+    updatedAt TEXT NOT NULL,
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, resource, userId)
   )''');
 }
 

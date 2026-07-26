@@ -35,12 +35,18 @@ class SyncService {
   /// cached data. Safe to call repeatedly; errors are reported via [status].
   Future<void> Function()? onRefresh;
 
+  /// Set by the app to refresh the visible cache after a write is queued
+  /// locally while offline.
+  Future<void> Function()? onLocalDataChanged;
+
   final _listeners = <void Function(SyncStatus)>[];
   void addListener(void Function(SyncStatus) l) => _listeners.add(l);
   void removeListener(void Function(SyncStatus) l) => _listeners.remove(l);
   void _emit(SyncStatus s) {
     _status = s;
-    for (final l in _listeners) l(s);
+    for (final l in _listeners) {
+      l(s);
+    }
   }
 
   final _pendingListeners = <void Function(int)>[];
@@ -52,7 +58,9 @@ class SyncService {
   void updatePendingCount(int count) {
     if (_pendingCount == count) return;
     _pendingCount = count;
-    for (final l in _pendingListeners) l(count);
+    for (final l in _pendingListeners) {
+      l(count);
+    }
   }
 
   Future<void> start() async {
@@ -98,6 +106,7 @@ class SyncService {
     try {
       await Repo.instance.syncPendingOptions();
       await Repo.instance.syncPendingTransactions();
+      await Repo.instance.syncPendingDeletes();
       await Repo.instance.syncPendingPlanningWrites();
       await Repo.instance.syncPendingHealthWrites();
       await onRefresh?.call();

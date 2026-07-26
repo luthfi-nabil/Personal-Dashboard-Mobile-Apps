@@ -15,15 +15,32 @@ class AppDataNotifier extends AutoDisposeAsyncNotifier<AppData> {
     // and can keep showing the previous user's AppData.
     ref.watch(configProvider.select((cfg) => cfg.userId));
     SyncService.instance.onRefresh = refreshRemote;
-    ref.onDispose(() => SyncService.instance.onRefresh = null);
+    SyncService.instance.onLocalDataChanged = refreshCached;
+    ref.onDispose(() {
+      SyncService.instance.onRefresh = null;
+      SyncService.instance.onLocalDataChanged = null;
+    });
     final cached = await Repo.instance.cached();
     unawaited(SyncService.instance.syncNow());
     return cached;
   }
 
   Future<void> refresh() async {
-    state = await AsyncValue.guard(() => Repo.instance.cached());
+    await refreshCached();
     await SyncService.instance.syncNow();
+  }
+
+  Future<void> refreshCached() async {
+    try {
+      state = AsyncValue.data(await Repo.instance.cached());
+    } catch (_) {
+      // Keep the last visible data instead of replacing the screen with an
+      // error state after a local write. Explicit full refresh still reports
+      // sync/API failures through SyncService.
+      if (!state.hasValue) {
+        rethrow;
+      }
+    }
   }
 
   Future<void> refreshRemote() async {
