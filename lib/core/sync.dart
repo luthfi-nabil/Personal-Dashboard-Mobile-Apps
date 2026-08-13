@@ -97,22 +97,35 @@ class SyncService {
     }
   }
 
-  Future<void> syncNow() async {
-    if (_status == SyncStatus.syncing) return;
+  /// Pushes everything queued locally and then asks the app to re-read the
+  /// server via [onRefresh].
+  ///
+  /// Returns `false` when the whole body was skipped - a sync was already in
+  /// flight, or the device is offline / signed out - so a caller that must be
+  /// sure the server was actually read (the manual Refresh button) can do the
+  /// remote read itself instead of silently doing nothing.
+  Future<bool> syncNow() async {
+    if (_status == SyncStatus.syncing) return false;
     final cfg = ConfigService.instance.current;
-    if (!cfg.isLoggedIn || !_online) return;
+    if (!cfg.isLoggedIn || !_online) return false;
 
     _emit(SyncStatus.syncing);
     try {
+      // Flags toggled while the API was unreachable go up first, so the
+      // refresh below reads back what this device already shows.
+      await ConfigService.instance.pushPendingFeatures();
       await Repo.instance.syncPendingOptions();
       await Repo.instance.syncPendingTransactions();
+      await Repo.instance.syncPendingDetailChecks();
       await Repo.instance.syncPendingDeletes();
       await Repo.instance.syncPendingPlanningWrites();
       await Repo.instance.syncPendingHealthWrites();
       await onRefresh?.call();
       _emit(SyncStatus.done);
+      return true;
     } catch (_) {
       _emit(SyncStatus.error);
+      return true;
     }
   }
 

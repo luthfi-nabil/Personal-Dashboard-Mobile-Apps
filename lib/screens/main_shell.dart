@@ -42,6 +42,7 @@ class MainShell extends ConsumerWidget {
             syncStatus: syncStatus,
             pendingCount: pendingCount,
             c: c,
+            onRefresh: () => refreshNow(context, ref),
           ),
           Expanded(child: child),
         ],
@@ -65,16 +66,40 @@ class MainShell extends ConsumerWidget {
   }
 }
 
+/// Pulls fresh data from the APIs and tells the user what happened.
+///
+/// Shared by [MainShell] and the Diabetic shell so the button behaves the same
+/// wherever it appears. Data is otherwise only refreshed on a timer, so this is
+/// the way to see a transaction that was entered on another device right now.
+Future<void> refreshNow(BuildContext context, WidgetRef ref) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final outcome = await ref.read(appDataProvider.notifier).refreshFromServer();
+  if (!context.mounted) return;
+  final message = switch (outcome) {
+    RefreshOutcome.refreshed => 'Data refreshed',
+    RefreshOutcome.offline => 'No connection - showing data saved on this device',
+    RefreshOutcome.failed => 'Could not reach the API - showing data saved on this device',
+  };
+  messenger
+    ..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(
+      content: Text(message),
+      duration: const Duration(seconds: 2),
+    ));
+}
+
 class _TopBar extends StatelessWidget {
   final String username;
   final SyncStatus syncStatus;
   final int pendingCount;
   final AppColors c;
+  final VoidCallback onRefresh;
   const _TopBar({
     required this.username,
     required this.syncStatus,
     required this.pendingCount,
     required this.c,
+    required this.onRefresh,
   });
 
   @override
@@ -136,6 +161,11 @@ class _TopBar extends StatelessWidget {
                   fontWeight: FontWeight.w600, fontSize: 15, color: c.ink),
             ),
           ),
+          _RefreshButton(
+            busy: syncStatus == SyncStatus.syncing,
+            onRefresh: onRefresh,
+            c: c,
+          ),
           GestureDetector(
             onTap: () => context.go(
               pendingCount > 0 ? '/pending-sync' : '/settings',
@@ -164,6 +194,38 @@ class _TopBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Manual "pull the latest data now" control, next to the sync pill.
+///
+/// While a sync is running it turns into a spinner and stops accepting taps,
+/// so it is obvious that something is happening and a second tap cannot start
+/// an overlapping refresh.
+class _RefreshButton extends StatelessWidget {
+  final bool busy;
+  final VoidCallback onRefresh;
+  final AppColors c;
+
+  const _RefreshButton({
+    required this.busy,
+    required this.onRefresh,
+    required this.c,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: busy ? 'Refreshing...' : 'Refresh data',
+      onPressed: busy ? null : onRefresh,
+      icon: busy
+          ? SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2, color: c.accent),
+            )
+          : Icon(Icons.refresh_rounded, color: c.ink),
     );
   }
 }

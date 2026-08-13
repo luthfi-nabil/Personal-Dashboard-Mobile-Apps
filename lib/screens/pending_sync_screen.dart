@@ -194,6 +194,9 @@ Future<List<_PendingSyncItem>> _loadPendingItems(String userId) async {
     AppDb.instance.getPendingInsulinUsages(userId),
     AppDb.instance.getPendingBloodSugarLogs(userId),
     AppDb.instance.getPendingDeletes(userId),
+    AppDb.instance.getDirtyTransactionDetails(userId),
+    AppDb.instance.getPendingConsumables(userId),
+    AppDb.instance.getPendingInvestments(userId),
   ]);
 
   final items = <_PendingSyncItem>[
@@ -295,6 +298,40 @@ Future<List<_PendingSyncItem>> _loadPendingItems(String userId) async {
         icon: Icons.monitor_heart_outlined,
       ),
     for (final item in results[11] as List<PendingDelete>) _deleteItem(item),
+    // Line items whose tick was changed while the API was unreachable. The
+    // item itself is already on the server; only the checkbox is queued.
+    for (final item in results[12] as List<TransactionDetail>)
+      _PendingSyncItem(
+        group: 'Transactions',
+        title: item.itemName.isEmpty ? 'Item' : item.itemName,
+        subtitle: item.checked
+            ? 'Transaction detail - ticked'
+            : 'Transaction detail - unticked',
+        timestamp: item.updatedAt,
+        action: 'Update',
+        icon: Icons.checklist_rounded,
+      ),
+    for (final item in results[13] as List<Consumable>)
+      _PendingSyncItem(
+        group: 'Personal',
+        title: item.isPartOfBatch
+            ? '${item.itemName} (${item.unitIndex}/${item.unitTotal})'
+            : item.itemName,
+        subtitle: item.isInUse ? 'Consumable - in use' : 'Consumable - used up',
+        timestamp: item.updatedAt,
+        action: 'Create',
+        icon: Icons.inventory_2_outlined,
+      ),
+    for (final item in results[14] as List<Investment>)
+      _PendingSyncItem(
+        group: 'Finance',
+        title: item.name,
+        subtitle: '${item.kind.label} - '
+            '${fmtUnits(item.units)} ${item.kind.unitLabel}',
+        timestamp: item.updatedAt,
+        action: 'Create',
+        icon: Icons.trending_up_rounded,
+      ),
   ];
 
   items.sort((a, b) {

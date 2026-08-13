@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'features.dart';
+
 class Source {
   final String id;
   final String name;
@@ -219,6 +221,491 @@ class Transaction {
       );
 }
 
+/// A single line item of a spending transaction - the "transaction detail".
+///
+/// Rows are created either by hand on the Add-transaction screen or by the
+/// receipt scanner, which OCRs a printed price list and lets the user confirm
+/// each recognised item before saving. They map 1:1 onto the transaction-api's
+/// `spending_detail` table.
+class TransactionDetail {
+  final String id;
+
+  /// The owning transaction's id. For a spending queued offline this is the
+  /// locally generated uuid, which is replaced by the server id on the next
+  /// full refresh.
+  final String transactionId;
+  final String itemName;
+  final double quantity;
+  final double unitPrice;
+  final double amount;
+  final String note;
+
+  /// Whether the item is ticked on the checklist. Items start ticked; unticking
+  /// one records that it was not actually bought while keeping it in the
+  /// breakdown, and leaves it out of the checked total.
+  final bool checked;
+
+  /// `'pending'` (queued with a not-yet-pushed transaction), `'checkDirty'`
+  /// (synced item whose tick was changed offline) or `'synced'`.
+  final String syncState;
+  final String updatedAt;
+
+  const TransactionDetail({
+    required this.id,
+    required this.transactionId,
+    required this.itemName,
+    this.quantity = 1,
+    this.unitPrice = 0,
+    this.amount = 0,
+    this.note = '',
+    this.checked = true,
+    this.syncState = 'pending',
+    required this.updatedAt,
+  });
+
+  /// Line total, falling back to `quantity * unitPrice` when the OCR only
+  /// picked up a unit price.
+  double get lineTotal => amount != 0 ? amount : quantity * unitPrice;
+
+  /// What this row contributes to the amount actually paid.
+  double get checkedTotal => checked ? lineTotal : 0;
+
+  factory TransactionDetail.fromMap(Map<String, dynamic> m) =>
+      TransactionDetail(
+        id: m['id'] as String,
+        transactionId: m['transactionId'] as String,
+        itemName: m['itemName'] as String? ?? '',
+        quantity: (m['quantity'] as num?)?.toDouble() ?? 1,
+        unitPrice: (m['unitPrice'] as num?)?.toDouble() ?? 0,
+        amount: (m['amount'] as num?)?.toDouble() ?? 0,
+        note: m['note'] as String? ?? '',
+        checked: (m['checked'] as int? ?? 1) != 0,
+        syncState: m['syncState'] as String? ?? 'pending',
+        updatedAt: m['updatedAt'] as String,
+      );
+
+  /// Builds a detail from a `spending_detail` row returned by transaction-api.
+  factory TransactionDetail.fromApi(Map<String, dynamic> m) =>
+      TransactionDetail(
+        id: m['spending_detail_id'] as String,
+        transactionId: m['spending_id'] as String,
+        itemName: m['item_name'] as String? ?? '',
+        quantity: (m['quantity'] as num?)?.toDouble() ?? 1,
+        unitPrice: (m['unit_price'] as num?)?.toDouble() ?? 0,
+        amount: (m['amount'] as num?)?.toDouble() ?? 0,
+        note: m['note'] as String? ?? '',
+        // Servers that predate the checklist omit the field; those rows were
+        // all bought, so they read as ticked.
+        checked: m['is_checked'] as bool? ?? true,
+        syncState: 'synced',
+        updatedAt: (m['created_date'] ?? '').toString(),
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'transactionId': transactionId,
+        'itemName': itemName,
+        'quantity': quantity,
+        'unitPrice': unitPrice,
+        'amount': amount,
+        'note': note,
+        'checked': checked ? 1 : 0,
+        'syncState': syncState,
+        'updatedAt': updatedAt,
+      };
+
+  /// Request shape expected by `POST /api/user/spendings` -> `details[]`.
+  Map<String, dynamic> toApiPayload() => {
+        'item_name': itemName,
+        'quantity': quantity,
+        'unit_price': unitPrice,
+        'amount': lineTotal,
+        'note': note,
+        'checked': checked,
+      };
+
+  TransactionDetail copyWith({
+    String? id,
+    String? transactionId,
+    String? itemName,
+    double? quantity,
+    double? unitPrice,
+    double? amount,
+    String? note,
+    bool? checked,
+    String? syncState,
+    String? updatedAt,
+  }) =>
+      TransactionDetail(
+        id: id ?? this.id,
+        transactionId: transactionId ?? this.transactionId,
+        itemName: itemName ?? this.itemName,
+        quantity: quantity ?? this.quantity,
+        unitPrice: unitPrice ?? this.unitPrice,
+        amount: amount ?? this.amount,
+        note: note ?? this.note,
+        checked: checked ?? this.checked,
+        syncState: syncState ?? this.syncState,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+}
+
+/// One physical unit of something that gets used up - a bottle of shampoo, a
+/// tube of toothpaste.
+///
+/// Units are tracked one by one rather than as a stock count: buying a
+/// three-pack creates three of these, so each can run out on its own date and
+/// "how long does one last" is just [daysInUse]. Maps onto transaction-api's
+/// `consumable` table.
+class Consumable {
+  final String id;
+  final String itemName;
+  final String notes;
+
+  /// Position within the batch it was bought in, and that batch's size. Both
+  /// are 1 for a single unit added by hand; a 3-pack yields 1/3, 2/3, 3/3.
+  final int unitIndex;
+  final int unitTotal;
+  final double price;
+
+  /// When the unit came in.
+  final String inDate;
+
+  /// When it ran out; empty while it is still in use.
+  final String outDate;
+
+  /// Set when the unit came from a transaction's line item, so the page can
+  /// point back at the purchase.
+  final String transactionId;
+  final String transactionDetailId;
+  final String syncState;
+  final String updatedAt;
+
+  const Consumable({
+    required this.id,
+    required this.itemName,
+    this.notes = '',
+    this.unitIndex = 1,
+    this.unitTotal = 1,
+    this.price = 0,
+    required this.inDate,
+    this.outDate = '',
+    this.transactionId = '',
+    this.transactionDetailId = '',
+    this.syncState = 'synced',
+    required this.updatedAt,
+  });
+
+  bool get isInUse => outDate.isEmpty;
+
+  /// Whether this unit is one of several bought together, which is the only
+  /// case where the "2/3" label is worth showing.
+  bool get isPartOfBatch => unitTotal > 1;
+
+  /// Days between the in date and either the out date or today - how long the
+  /// unit lasted, or has lasted so far. Null when the in date is unreadable.
+  int? get daysInUse {
+    final start = DateTime.tryParse(inDate);
+    if (start == null) return null;
+    final end = outDate.isEmpty ? DateTime.now() : DateTime.tryParse(outDate);
+    if (end == null) return null;
+    final days = end.difference(start).inDays;
+    return days < 0 ? 0 : days;
+  }
+
+  factory Consumable.fromMap(Map<String, dynamic> m) => Consumable(
+        id: m['id'] as String,
+        itemName: m['itemName'] as String? ?? '',
+        notes: m['notes'] as String? ?? '',
+        unitIndex: (m['unitIndex'] as num?)?.toInt() ?? 1,
+        unitTotal: (m['unitTotal'] as num?)?.toInt() ?? 1,
+        price: (m['price'] as num?)?.toDouble() ?? 0,
+        inDate: m['inDate'] as String? ?? '',
+        outDate: m['outDate'] as String? ?? '',
+        transactionId: m['transactionId'] as String? ?? '',
+        transactionDetailId: m['transactionDetailId'] as String? ?? '',
+        syncState: m['syncState'] as String? ?? 'synced',
+        updatedAt: m['updatedAt'] as String? ?? '',
+      );
+
+  /// Builds a unit from a `consumable` row returned by transaction-api.
+  factory Consumable.fromApi(Map<String, dynamic> m) => Consumable(
+        id: m['consumable_id'] as String,
+        itemName: m['item_name'] as String? ?? '',
+        notes: m['notes'] as String? ?? '',
+        unitIndex: (m['unit_index'] as num?)?.toInt() ?? 1,
+        unitTotal: (m['unit_total'] as num?)?.toInt() ?? 1,
+        price: (m['price'] as num?)?.toDouble() ?? 0,
+        inDate: (m['in_date'] ?? '').toString(),
+        outDate: (m['out_date'] ?? '').toString(),
+        transactionId: (m['spending_id'] ?? '').toString(),
+        transactionDetailId: (m['spending_detail_id'] ?? '').toString(),
+        syncState: 'synced',
+        updatedAt: (m['updated_date'] ?? m['created_date'] ?? '').toString(),
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'itemName': itemName,
+        'notes': notes,
+        'unitIndex': unitIndex,
+        'unitTotal': unitTotal,
+        'price': price,
+        'inDate': inDate,
+        'outDate': outDate,
+        'transactionId': transactionId,
+        'transactionDetailId': transactionDetailId,
+        'syncState': syncState,
+        'updatedAt': updatedAt,
+      };
+
+  /// Request shape expected by `POST /api/user/consumables`.
+  Map<String, dynamic> toApiPayload() => {
+        'consumable_id': id,
+        'item_name': itemName,
+        'notes': notes,
+        'unit_index': unitIndex,
+        'unit_total': unitTotal,
+        'price': price,
+        'in_date': inDate,
+        'out_date': outDate.isEmpty ? null : outDate,
+        if (transactionId.isNotEmpty) 'spending_id': transactionId,
+        if (transactionDetailId.isNotEmpty)
+          'spending_detail_id': transactionDetailId,
+      };
+
+  Consumable copyWith({
+    String? id,
+    String? itemName,
+    String? notes,
+    int? unitIndex,
+    int? unitTotal,
+    double? price,
+    String? inDate,
+    String? outDate,
+    String? transactionId,
+    String? transactionDetailId,
+    String? syncState,
+    String? updatedAt,
+  }) =>
+      Consumable(
+        id: id ?? this.id,
+        itemName: itemName ?? this.itemName,
+        notes: notes ?? this.notes,
+        unitIndex: unitIndex ?? this.unitIndex,
+        unitTotal: unitTotal ?? this.unitTotal,
+        price: price ?? this.price,
+        inDate: inDate ?? this.inDate,
+        outDate: outDate ?? this.outDate,
+        transactionId: transactionId ?? this.transactionId,
+        transactionDetailId: transactionDetailId ?? this.transactionDetailId,
+        syncState: syncState ?? this.syncState,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+}
+
+/// What a holding on the Investment page actually is. The string values are
+/// the `kind` column in transaction-api's `investment` table — never rename
+/// one without a migration, since rows carry it verbatim.
+enum InvestmentKind {
+  mutualFund('mutual_fund', 'Reksa Dana', 'unit'),
+  gold('gold', 'Gold', 'gr'),
+  silver('silver', 'Silver', 'gr'),
+
+  /// Catch-all for anything the other three do not cover — crypto, bonds,
+  /// stocks. Held in whatever unit makes sense to the user and always priced
+  /// by hand, since there is no one API that could quote all of them.
+  others('others', 'Others', 'unit');
+
+  const InvestmentKind(this.id, this.label, this.unitLabel);
+
+  final String id;
+  final String label;
+
+  /// What one unit of this holding is: a fund unit, or a gram of metal.
+  final String unitLabel;
+
+  /// Gold and silver are the two whose value can be refreshed automatically;
+  /// the rest have no public price API and are always entered by hand.
+  bool get isMetal => this == InvestmentKind.gold || this == InvestmentKind.silver;
+
+  static InvestmentKind fromId(String? id) => values.firstWhere(
+        (k) => k.id == id,
+        orElse: () => InvestmentKind.mutualFund,
+      );
+}
+
+/// One investment holding — a reksa dana position, a quantity of gold or
+/// silver, or anything else under [InvestmentKind.others]. Kept apart from
+/// [Source] balances, which are liquid cash; that split is why Home's headline
+/// figure reads "Liquid".
+///
+/// [units] and the two unit prices mean whatever [kind] implies: units owned
+/// and NAB per unit for a fund, grams and price per gram for metal, units owned
+/// and price per unit for anything else.
+class Investment {
+  final String id;
+  final InvestmentKind kind;
+  final String name;
+
+  /// Where it is held — Bibit, Bareksa, Pegadaian, a safe at home.
+  final String provider;
+  final double units;
+
+  /// Cost basis per unit. Set when the holding is recorded and never touched
+  /// again, so gain/loss survives every price refresh.
+  final double buyUnitPrice;
+
+  /// Latest known value per unit. Refreshed from a price API for metal, typed
+  /// in by hand for everything else. Stored rather than fetched on read so the
+  /// page still shows a value offline — [priceUpdatedAt] says how stale it is.
+  final double lastUnitPrice;
+
+  /// Where [lastUnitPrice] came from, e.g. `anekalogam` or `spot`. Empty for a
+  /// hand-entered price.
+  final String priceSource;
+  final String priceUpdatedAt;
+  final String notes;
+  final String acquiredDate;
+  final String syncState;
+  final String updatedAt;
+
+  const Investment({
+    required this.id,
+    required this.kind,
+    required this.name,
+    this.provider = '',
+    this.units = 0,
+    this.buyUnitPrice = 0,
+    this.lastUnitPrice = 0,
+    this.priceSource = '',
+    this.priceUpdatedAt = '',
+    this.notes = '',
+    required this.acquiredDate,
+    this.syncState = 'synced',
+    required this.updatedAt,
+  });
+
+  /// What was put in, at the price actually paid.
+  double get investedValue => units * buyUnitPrice;
+
+  /// What it is worth at the last known price. Falls back to the cost basis
+  /// while no price has been recorded, which beats showing a total loss.
+  double get currentValue =>
+      units * (lastUnitPrice > 0 ? lastUnitPrice : buyUnitPrice);
+
+  double get gain => currentValue - investedValue;
+
+  /// Gain as a fraction of what was invested. Null when nothing was invested,
+  /// where a percentage would be meaningless rather than infinite.
+  double? get gainRatio => investedValue == 0 ? null : gain / investedValue;
+
+  factory Investment.fromMap(Map<String, dynamic> m) => Investment(
+        id: m['id'] as String,
+        kind: InvestmentKind.fromId(m['kind'] as String?),
+        name: m['name'] as String? ?? '',
+        provider: m['provider'] as String? ?? '',
+        units: (m['units'] as num?)?.toDouble() ?? 0,
+        buyUnitPrice: (m['buyUnitPrice'] as num?)?.toDouble() ?? 0,
+        lastUnitPrice: (m['lastUnitPrice'] as num?)?.toDouble() ?? 0,
+        priceSource: m['priceSource'] as String? ?? '',
+        priceUpdatedAt: m['priceUpdatedAt'] as String? ?? '',
+        notes: m['notes'] as String? ?? '',
+        acquiredDate: m['acquiredDate'] as String? ?? '',
+        syncState: m['syncState'] as String? ?? 'synced',
+        updatedAt: m['updatedAt'] as String? ?? '',
+      );
+
+  /// Builds a holding from an `investment` row returned by transaction-api.
+  factory Investment.fromApi(Map<String, dynamic> m) => Investment(
+        id: m['investment_id'] as String,
+        kind: InvestmentKind.fromId(m['kind'] as String?),
+        name: m['name'] as String? ?? '',
+        provider: m['provider'] as String? ?? '',
+        units: (m['units'] as num?)?.toDouble() ?? 0,
+        buyUnitPrice: (m['buy_unit_price'] as num?)?.toDouble() ?? 0,
+        lastUnitPrice: (m['last_unit_price'] as num?)?.toDouble() ?? 0,
+        priceSource: m['price_source'] as String? ?? '',
+        priceUpdatedAt: (m['price_updated_date'] ?? '').toString(),
+        notes: m['notes'] as String? ?? '',
+        acquiredDate: (m['acquired_date'] ?? '').toString(),
+        syncState: 'synced',
+        updatedAt: (m['updated_date'] ?? m['created_date'] ?? '').toString(),
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'kind': kind.id,
+        'name': name,
+        'provider': provider,
+        'units': units,
+        'buyUnitPrice': buyUnitPrice,
+        'lastUnitPrice': lastUnitPrice,
+        'priceSource': priceSource,
+        'priceUpdatedAt': priceUpdatedAt,
+        'notes': notes,
+        'acquiredDate': acquiredDate,
+        'syncState': syncState,
+        'updatedAt': updatedAt,
+      };
+
+  /// Request shape expected by `POST /api/user/investments`.
+  Map<String, dynamic> toApiPayload() => {
+        'investment_id': id,
+        'kind': kind.id,
+        'name': name,
+        'provider': provider,
+        'units': units,
+        'buy_unit_price': buyUnitPrice,
+        'last_unit_price': lastUnitPrice,
+        'price_source': priceSource,
+        'price_updated_date': priceUpdatedAt.isEmpty ? null : priceUpdatedAt,
+        'notes': notes,
+        'acquired_date': acquiredDate,
+      };
+
+  Investment copyWith({
+    String? id,
+    InvestmentKind? kind,
+    String? name,
+    String? provider,
+    double? units,
+    double? buyUnitPrice,
+    double? lastUnitPrice,
+    String? priceSource,
+    String? priceUpdatedAt,
+    String? notes,
+    String? acquiredDate,
+    String? syncState,
+    String? updatedAt,
+  }) =>
+      Investment(
+        id: id ?? this.id,
+        kind: kind ?? this.kind,
+        name: name ?? this.name,
+        provider: provider ?? this.provider,
+        units: units ?? this.units,
+        buyUnitPrice: buyUnitPrice ?? this.buyUnitPrice,
+        lastUnitPrice: lastUnitPrice ?? this.lastUnitPrice,
+        priceSource: priceSource ?? this.priceSource,
+        priceUpdatedAt: priceUpdatedAt ?? this.priceUpdatedAt,
+        notes: notes ?? this.notes,
+        acquiredDate: acquiredDate ?? this.acquiredDate,
+        syncState: syncState ?? this.syncState,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+}
+
+/// Reads the persisted `features` object, ignoring anything that is not a
+/// plain bool so a hand-edited or older config can never crash startup.
+Map<String, bool> _parseFeatures(dynamic raw) {
+  if (raw is! Map) return const {};
+  return {
+    for (final entry in raw.entries)
+      if (entry.value is bool) entry.key.toString(): entry.value as bool,
+  };
+}
+
 class AppConfig {
   final String apiBase;
   final String healthBase;
@@ -236,6 +723,11 @@ class AppConfig {
   final String tokenExpiresAt;
   final String userId;
 
+  /// Optional features the user has switched on or off, keyed by
+  /// [AppFeature.id]. Absent keys fall back to the feature's default, so a
+  /// flag added in a later release turns itself on without a migration.
+  final Map<String, bool> features;
+
   const AppConfig({
     this.apiBase = 'http://127.0.0.1:8080',
     this.healthBase = 'http://127.0.0.1:8082',
@@ -252,7 +744,21 @@ class AppConfig {
     this.authToken = '',
     this.tokenExpiresAt = '',
     this.userId = '',
+    this.features = const {},
   });
+
+  /// Whether the optional feature [featureId] is switched on. Unknown or
+  /// never-touched flags fall back to the registry default.
+  bool isFeatureEnabled(String featureId) =>
+      features[featureId] ?? AppFeatures.byId(featureId)?.defaultEnabled ?? true;
+
+  /// Convenience for the Health/Diabetic section, which is checked in a lot
+  /// of places.
+  bool get healthEnabled => isFeatureEnabled(AppFeatures.health.id);
+
+  /// Returns a copy with [featureId] set to [enabled].
+  AppConfig withFeature(String featureId, bool enabled) =>
+      copyWith(features: {...features, featureId: enabled});
 
   /// Whether [tokenExpiresAt] is set and in the past.
   bool get isTokenExpired {
@@ -288,6 +794,7 @@ class AppConfig {
       authToken: m['authToken'] as String? ?? '',
       tokenExpiresAt: m['tokenExpiresAt'] as String? ?? '',
       userId: m['userId'] as String? ?? '',
+      features: _parseFeatures(m['features']),
     );
   }
 
@@ -307,6 +814,7 @@ class AppConfig {
         'authToken': authToken,
         'tokenExpiresAt': tokenExpiresAt,
         'userId': userId,
+        'features': features,
       });
 
   AppConfig copyWith({
@@ -325,6 +833,7 @@ class AppConfig {
     String? authToken,
     String? tokenExpiresAt,
     String? userId,
+    Map<String, bool>? features,
   }) =>
       AppConfig(
         apiBase: apiBase ?? this.apiBase,
@@ -342,6 +851,7 @@ class AppConfig {
         authToken: authToken ?? this.authToken,
         tokenExpiresAt: tokenExpiresAt ?? this.tokenExpiresAt,
         userId: userId ?? this.userId,
+        features: features ?? this.features,
       );
 }
 
@@ -349,9 +859,18 @@ class AppData {
   final List<Source> sources;
   final List<Category> categories;
   final List<Transaction> transactions;
+
+  /// Line items for spending transactions, keyed by [TransactionDetail.transactionId].
+  final List<TransactionDetail> transactionDetails;
   final List<WishlistItem> wishlistItems;
   final List<RoutineTransaction> routineTransactions;
   final List<RoutinePayment> routinePayments;
+
+  /// Units of things that run out, newest first. See [Consumable].
+  final List<Consumable> consumables;
+
+  /// Reksa dana, gold and silver holdings. See [Investment].
+  final List<Investment> investments;
   final List<InsulinItem> insulinItems;
   final List<InsulinAssign> insulinAssigns;
   final List<InsulinUsage> insulinUsages;
@@ -361,14 +880,23 @@ class AppData {
     required this.sources,
     required this.categories,
     required this.transactions,
+    this.transactionDetails = const [],
     this.wishlistItems = const [],
     this.routineTransactions = const [],
     this.routinePayments = const [],
+    this.consumables = const [],
+    this.investments = const [],
     this.insulinItems = const [],
     this.insulinAssigns = const [],
     this.insulinUsages = const [],
     this.bloodSugarLogs = const [],
   });
+
+  /// The line items belonging to [transactionId], or an empty list when the
+  /// transaction was saved without a breakdown.
+  List<TransactionDetail> detailsFor(String transactionId) => transactionDetails
+      .where((d) => d.transactionId == transactionId)
+      .toList();
 }
 
 class PendingDelete {

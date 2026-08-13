@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../core/config.dart';
 import '../core/db.dart';
+import '../core/features.dart';
 import '../core/seed.dart';
 import '../core/sync.dart';
 import '../theme/app_theme.dart';
@@ -44,6 +45,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // Explicitly replace the shell route after clearing the session. The
     // router redirect remains a fallback for expiry and API-triggered logout.
     context.go('/login');
+  }
+
+  /// Writes the flag locally (always succeeds, online or not) and lets
+  /// [ConfigService] deal with getting it to the server.
+  Future<void> _setFeature(AppFeature feature, bool enabled) async {
+    // ConfigService notifies its listeners, so `configProvider` (and every
+    // screen watching it) picks the new value up on its own.
+    await ConfigService.instance.setFeature(feature.id, enabled);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('${feature.label} ${enabled ? 'enabled' : 'disabled'}'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   Future<void> _syncNow() async {
@@ -246,6 +262,35 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               )),
           const SizedBox(height: 18),
 
+          // ── Extra features ─────────────────────────────────────
+          _SectionTitle('Extra features', c),
+          const SizedBox(height: 10),
+          _card(
+            c,
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Switch optional sections on or off. Changes apply straight '
+                  'away and are saved to your account when the API is '
+                  'reachable.',
+                  style: TextStyle(fontSize: 12, color: c.muted),
+                ),
+                const SizedBox(height: 8),
+                for (var i = 0; i < AppFeatures.all.length; i++) ...[
+                  if (i > 0) const Divider(height: 20),
+                  _FeatureToggle(
+                    feature: AppFeatures.all[i],
+                    enabled: cfg.isFeatureEnabled(AppFeatures.all[i].id),
+                    c: c,
+                    onChanged: (v) => _setFeature(AppFeatures.all[i], v),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 18),
+
           // ── Appearance ─────────────────────────────────────────
           _SectionTitle('Appearance', c),
           const SizedBox(height: 10),
@@ -367,6 +412,57 @@ class _SectionTitle extends StatelessWidget {
             fontWeight: FontWeight.w600,
             color: c.muted,
             letterSpacing: 0.06));
+  }
+}
+
+/// One row in the "Extra features" card: label, one-line description and the
+/// switch that turns the section on or off.
+class _FeatureToggle extends StatelessWidget {
+  final AppFeature feature;
+  final bool enabled;
+  final AppColors c;
+  final ValueChanged<bool> onChanged;
+
+  const _FeatureToggle({
+    required this.feature,
+    required this.enabled,
+    required this.c,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                feature.label,
+                style: TextStyle(
+                  color: c.ink,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                feature.description,
+                style: TextStyle(color: c.muted, fontSize: 12, height: 1.35),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Switch(
+          value: enabled,
+          activeColor: c.accent,
+          onChanged: onChanged,
+        ),
+      ],
+    );
   }
 }
 

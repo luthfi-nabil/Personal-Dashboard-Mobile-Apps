@@ -59,6 +59,10 @@ class RemoteApi {
   Uri _authUri(String path) =>
       Uri.parse('${_trim(cfg.loginBase)}/api/auth$path');
 
+  /// login-api's JWT-protected `/api/user/...` scope, which owns app settings.
+  Uri _loginUserUri(String path) =>
+      Uri.parse('${_trim(cfg.loginBase)}/api/user$path');
+
   /// Headers sent with every request. Includes the login-api JWT, when
   /// present, so transaction-api / health-api can resolve `created_by`.
   Map<String, String> _headers() => {
@@ -198,9 +202,18 @@ class RemoteApi {
   Future<Map<String, dynamic>> me() async =>
       Map<String, dynamic>.from(await _get(_authUri('/me')) as Map);
 
-  // ── transaction-api: settings ──────────────────────────────────────────
+  // ── login-api: app settings ────────────────────────────────────────────
+  // `app_settings` moved out of transaction-api and is now owned by login-api,
+  // so both calls below go to `cfg.loginBase`.
   Future<List<Map<String, dynamic>>> getSettings() async =>
-      _list(await _get(_txnUri('/settings')));
+      _list(await _get(_loginUserUri('/settings')));
+
+  /// `POST /api/user/settings` on login-api. Stores one preference against the
+  /// signed-in account. Only `FEATURE_*` / `PREF_*` keys are accepted.
+  Future<void> putSetting(String key, String value) => _post(
+        _loginUserUri('/settings'),
+        {'app_setting_key': key, 'app_setting_value': value},
+      );
 
   // ── transaction-api: sources ───────────────────────────────────────────
   Future<List<Map<String, dynamic>>> getSources() async =>
@@ -264,6 +277,10 @@ class RemoteApi {
   Future<List<Map<String, dynamic>>> getEarnings() async =>
       _list(await _get(_txnUri('/earnings')));
 
+  /// [createdDate] is when the earning was entered on the device. It is sent so
+  /// an earning queued in local mode keeps that moment instead of being stamped
+  /// with the time sync finally pushed it; servers that predate the field
+  /// ignore it and stamp "now" as before.
   Future<Map<String, dynamic>> createEarning({
     required double totalAmount,
     required String description,
@@ -271,6 +288,7 @@ class RemoteApi {
     required String earningCategory,
     required String sourceId,
     required String source,
+    String? createdDate,
   }) async =>
       Map<String, dynamic>.from(await _post(_txnUri('/earnings'), {
         'total_amount': totalAmount,
@@ -279,6 +297,8 @@ class RemoteApi {
         'earning_category': earningCategory,
         'source_id': sourceId,
         'source': source,
+        if (createdDate != null && createdDate.isNotEmpty)
+          'created_date': createdDate,
       }) as Map);
 
   // ── transaction-api: spendings ─────────────────────────────────────────
@@ -288,6 +308,38 @@ class RemoteApi {
   Future<List<Map<String, dynamic>>> getSpendings() async =>
       _list(await _get(_txnUri('/spendings')));
 
+  /// Line items ("transaction detail") for every spending the user owns, or
+  /// only those of [spendingId] when it is supplied.
+  Future<List<Map<String, dynamic>>> getSpendingDetails(
+          {String? spendingId}) async =>
+      _list(await _get(_txnUri(
+        '/spending-details',
+        spendingId == null ? null : {'spending_id': spendingId},
+      )));
+
+  /// Ticks or unticks one stored line item. The spending header itself is
+  /// immutable, so this is the only edit a saved breakdown accepts.
+  Future<void> setSpendingDetailChecked({
+    required String id,
+    required bool checked,
+  }) async {
+    final uri = _txnUri('/spending-details/$id/checked');
+    await _send(
+      'PUT',
+      uri,
+      () => http.put(
+        uri,
+        headers: _headers(),
+        body: jsonEncode({'checked': checked}),
+      ),
+      {'checked': checked},
+    );
+  }
+
+  /// Creates a spending. When [details] is non-empty the server also stores
+  /// them as `spending_detail` rows and, if [totalAmount] is 0, derives the
+  /// total from the items.
+  /// See [createEarning] for what [createdDate] is for.
   Future<Map<String, dynamic>> createSpending({
     required double totalAmount,
     required String description,
@@ -295,6 +347,8 @@ class RemoteApi {
     required String spendingCategory,
     required String sourceId,
     required String source,
+    List<Map<String, dynamic>> details = const [],
+    String? createdDate,
   }) async =>
       Map<String, dynamic>.from(await _post(_txnUri('/spendings'), {
         'total_amount': totalAmount,
@@ -303,6 +357,9 @@ class RemoteApi {
         'spending_category': spendingCategory,
         'source_id': sourceId,
         'source': source,
+        if (details.isNotEmpty) 'details': details,
+        if (createdDate != null && createdDate.isNotEmpty)
+          'created_date': createdDate,
       }) as Map);
 
   // ── health-api: insulin items ──────────────────────────────────────────
@@ -313,6 +370,7 @@ class RemoteApi {
   Future<List<Map<String, dynamic>>> getPlannedExpenses() async =>
       _list(await _get(_txnUri('/planned-expenses')));
 
+  /// See [createEarning] for what [createdDate] is for.
   Future<Map<String, dynamic>> createPlannedExpense({
     required String id,
     required String itemName,
@@ -322,6 +380,7 @@ class RemoteApi {
     String? categoryName,
     String? notes,
     required String priority,
+    String? createdDate,
   }) async =>
       Map<String, dynamic>.from(await _post(_txnUri('/planned-expenses'), {
         'planned_expense_id': id,
@@ -332,26 +391,29 @@ class RemoteApi {
         'category': categoryName,
         'notes': notes,
         'priority': priority,
+        if (createdDate != null && createdDate.isNotEmpty)
+          'created_date': createdDate,
       }) as Map);
 
+  /// [changedAt] is when the item was fulfilled or canceled on the device, so
+  /// a status flipped in local mode keeps that moment.
   Future<void> updatePlannedExpenseStatus({
     required String id,
     required String status,
     double? fulfilledPrice,
+    String? changedAt,
   }) async {
     final uri = _txnUri('/planned-expenses/$id/status');
+    final body = {
+      'status': status,
+      'fulfilled_price': fulfilledPrice,
+      if (changedAt != null && changedAt.isNotEmpty) 'changed_at': changedAt,
+    };
     await _send(
       'PUT',
       uri,
-      () => http.put(
-        uri,
-        headers: _headers(),
-        body: jsonEncode({
-          'status': status,
-          'fulfilled_price': fulfilledPrice,
-        }),
-      ),
-      {'status': status, 'fulfilled_price': fulfilledPrice},
+      () => http.put(uri, headers: _headers(), body: jsonEncode(body)),
+      body,
     );
   }
 
@@ -369,6 +431,7 @@ class RemoteApi {
     String transactionType = 'spending',
     String? categoryId,
     String? categoryName,
+    String? createdDate,
   }) =>
       createPlannedExpense(
         id: id,
@@ -379,20 +442,92 @@ class RemoteApi {
         categoryName: categoryName,
         notes: notes,
         priority: priority,
+        createdDate: createdDate,
       );
 
   Future<void> updateWishlistStatus({
     required String id,
     required String status,
     double? fulfilledPrice,
+    String? changedAt,
   }) =>
       updatePlannedExpenseStatus(
         id: id,
         status: status,
         fulfilledPrice: fulfilledPrice,
+        changedAt: changedAt,
       );
 
   Future<void> deleteWishlist(String id) => deletePlannedExpense(id);
+
+  // ── transaction-api: consumables ───────────────────────────────────────
+  Future<List<Map<String, dynamic>>> getConsumables() async =>
+      _list(await _get(_txnUri('/consumables')));
+
+  /// Saves one unit. Posting an id that already exists updates it, so a write
+  /// queued offline can be retried safely.
+  Future<Map<String, dynamic>> createConsumable(
+          Map<String, dynamic> payload) async =>
+      Map<String, dynamic>.from(
+          await _post(_txnUri('/consumables'), payload) as Map);
+
+  /// Records the date a unit ran out, or puts it back in use with a null
+  /// [outDate].
+  Future<void> setConsumableOutDate({
+    required String id,
+    required String? outDate,
+  }) async {
+    final uri = _txnUri('/consumables/$id/out');
+    await _send(
+      'PUT',
+      uri,
+      () => http.put(
+        uri,
+        headers: _headers(),
+        body: jsonEncode({'out_date': outDate}),
+      ),
+      {'out_date': outDate},
+    );
+  }
+
+  Future<void> deleteConsumable(String id) async =>
+      _delete(_txnUri('/consumables/$id'));
+
+  // ── transaction-api: investments ───────────────────────────────────────
+  Future<List<Map<String, dynamic>>> getInvestments() async =>
+      _list(await _get(_txnUri('/investments')));
+
+  /// Saves one holding. Posting an id that already exists updates it, so a
+  /// write queued offline can be retried safely.
+  Future<Map<String, dynamic>> createInvestment(
+          Map<String, dynamic> payload) async =>
+      Map<String, dynamic>.from(
+          await _post(_txnUri('/investments'), payload) as Map);
+
+  /// Records a fresh valuation only. Units and cost basis are not editable
+  /// through this route, so a price refresh can never rewrite the purchase.
+  Future<void> updateInvestmentPrice({
+    required String id,
+    required double lastUnitPrice,
+    required String priceSource,
+    required String priceUpdatedAt,
+  }) async {
+    final uri = _txnUri('/investments/$id/price');
+    final body = {
+      'last_unit_price': lastUnitPrice,
+      'price_source': priceSource,
+      'price_updated_date': priceUpdatedAt,
+    };
+    await _send(
+      'PUT',
+      uri,
+      () => http.put(uri, headers: _headers(), body: jsonEncode(body)),
+      body,
+    );
+  }
+
+  Future<void> deleteInvestment(String id) async =>
+      _delete(_txnUri('/investments/$id'));
 
   // Routine transactions
   Future<List<Map<String, dynamic>>> getRoutines() async =>
@@ -401,6 +536,7 @@ class RemoteApi {
   Future<List<Map<String, dynamic>>> getRoutinePayments() async =>
       _list(await _get(_txnUri('/routines/payments')));
 
+  /// See [createEarning] for what [createdDate] is for.
   Future<Map<String, dynamic>> createRoutine({
     required String id,
     required String itemName,
@@ -408,6 +544,7 @@ class RemoteApi {
     required String reminder,
     required String spendingCategoryId,
     required String spendingCategory,
+    String? createdDate,
   }) async =>
       Map<String, dynamic>.from(await _post(_txnUri('/routines'), {
         'routine_id': id,
@@ -416,14 +553,20 @@ class RemoteApi {
         'reminder': reminder,
         'spending_category_id': spendingCategoryId,
         'spending_category': spendingCategory,
+        if (createdDate != null && createdDate.isNotEmpty)
+          'created_date': createdDate,
       }) as Map);
 
+  /// [boughtAt] is when the payment was confirmed on the device. The server
+  /// also copies it into the routine's "last bought" stamp, so a payment
+  /// confirmed in local mode does not jump forward to the time it was pushed.
   Future<Map<String, dynamic>> createRoutinePayment({
     required String routineId,
     required String id,
     required double price,
     required String sourceId,
     required String source,
+    String? boughtAt,
   }) async =>
       Map<String, dynamic>.from(
           await _post(_txnUri('/routines/$routineId/payments'), {
@@ -431,6 +574,7 @@ class RemoteApi {
         'price': price,
         'source_id': sourceId,
         'source': source,
+        if (boughtAt != null && boughtAt.isNotEmpty) 'bought_at': boughtAt,
       }) as Map);
 
   Future<void> deleteRoutine(String id) async =>
@@ -439,17 +583,20 @@ class RemoteApi {
   Future<List<Map<String, dynamic>>> getInsulinItems() async =>
       _list(await _get(_healthUri('/insulin-item')));
 
+  /// See [createEarning] for what [createdAt] is for.
   Future<Map<String, dynamic>> createInsulinItem({
     required String name,
     required double units,
     required String uom,
     String? notes,
+    String? createdAt,
   }) async =>
       Map<String, dynamic>.from(await _post(_healthUri('/insulin-item'), {
         'insulin_item_name': name,
         'units': units,
         'uom': uom,
         'notes': notes,
+        if (createdAt != null && createdAt.isNotEmpty) 'created_at': createdAt,
       }) as Map);
 
   // ── health-api: insulin assigns (batches) ──────────────────────────────
@@ -460,11 +607,13 @@ class RemoteApi {
     required String insulinItemId,
     required String batchNo,
     String? notes,
+    String? addedAt,
   }) async =>
       Map<String, dynamic>.from(await _post(_healthUri('/insulin-assign'), {
         'insulin_item_id': insulinItemId,
         'batch_no': batchNo,
         'notes': notes,
+        if (addedAt != null && addedAt.isNotEmpty) 'added_at': addedAt,
       }) as Map);
 
   Future<void> deleteInsulinAssign(String id) async =>
@@ -474,15 +623,20 @@ class RemoteApi {
   Future<List<Map<String, dynamic>>> getInsulinUsages() async =>
       _list(await _get(_healthUri('/insulin-usage')));
 
+  /// [administeredAt] is when the shot was logged on the device, so one queued
+  /// in local mode keeps that moment instead of the time it was pushed.
   Future<Map<String, dynamic>> createInsulinUsage({
     required String insulinAssignId,
     required double units,
     String? notes,
+    String? administeredAt,
   }) async =>
       Map<String, dynamic>.from(await _post(_healthUri('/insulin-usage'), {
         'insulin_assign_id': insulinAssignId,
         'units': units,
         'notes': notes,
+        if (administeredAt != null && administeredAt.isNotEmpty)
+          'administered_at': administeredAt,
       }) as Map);
 
   // ── health-api: blood sugar ───────────────────────────────────────────
@@ -492,16 +646,21 @@ class RemoteApi {
   Future<List<Map<String, dynamic>>> getBloodSugarLogs() async =>
       _list(await _get(_healthUri('/blood-sugar')));
 
+  /// [measuredAt] is when the reading was taken on the device; see
+  /// [createInsulinUsage].
   Future<Map<String, dynamic>> createBloodSugarLog({
     required double level,
     String unit = 'mg/dL',
     String? mealContext,
     String? notes,
+    String? measuredAt,
   }) async =>
       Map<String, dynamic>.from(await _post(_healthUri('/blood-sugar'), {
         'level': level,
         'unit': unit,
         'meal_context': mealContext,
         'notes': notes,
+        if (measuredAt != null && measuredAt.isNotEmpty)
+          'measured_at': measuredAt,
       }) as Map);
 }

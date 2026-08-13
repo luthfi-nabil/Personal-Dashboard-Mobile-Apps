@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/models.dart';
+import '../core/receipt_scanner.dart';
 import '../core/utils.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
@@ -34,10 +35,17 @@ class HomeScreen extends ConsumerWidget {
                 ))
             .toList()
           ..sort((a, b) => b.balance.compareTo(a.balance));
-        final totalNetWorth = sourceBalances.fold<double>(
+        final totalLiquid = sourceBalances.fold<double>(
           0,
           (sum, item) => sum + item.balance,
         );
+        // Holdings are valued at their last known unit price, which falls back
+        // to the buy price until the first refresh lands - see [Investment].
+        final totalInvestment = data.investments.fold<double>(
+          0,
+          (sum, item) => sum + item.currentValue,
+        );
+        final netWorth = totalLiquid + totalInvestment;
         final visibleSources = sourceBalances.take(6).toList();
         final latestBloodSugar = [...data.bloodSugarLogs]
           ..sort((a, b) => b.measuredAt.compareTo(a.measuredAt));
@@ -58,12 +66,82 @@ class HomeScreen extends ConsumerWidget {
             ),
             const SizedBox(height: 12),
             _NetWorthPanel(
-              totalNetWorth: totalNetWorth,
+              netWorth: netWorth,
               sourceCount: data.sources.length,
+              holdingCount: data.investments.length,
               currency: cfg.currency,
               c: c,
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 10),
+            // The two halves of the figure above, each opening the page that
+            // owns it.
+            Row(
+              children: [
+                Expanded(
+                  child: _BreakdownTile(
+                    icon: Icons.account_balance_wallet_outlined,
+                    label: 'Liquid',
+                    value: fmtRp(totalLiquid, cfg.currency),
+                    hint: '${data.sources.length} '
+                        'source${data.sources.length == 1 ? '' : 's'}',
+                    negative: totalLiquid < 0,
+                    onTap: () => context.go('/dashboard'),
+                    c: c,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _BreakdownTile(
+                    icon: Icons.trending_up_rounded,
+                    label: 'Investment',
+                    value: fmtRp(totalInvestment, cfg.currency),
+                    hint: '${data.investments.length} '
+                        'holding${data.investments.length == 1 ? '' : 's'}',
+                    negative: false,
+                    onTap: () => context.go('/investments'),
+                    c: c,
+                  ),
+                ),
+              ],
+            ),
+            // The whole Health block disappears when the Diabetic extra
+            // feature is switched off in Settings.
+            if (cfg.healthEnabled) ...[
+              const SizedBox(height: 18),
+              _SectionHeader(
+                title: 'Health',
+                action: 'Diabetic',
+                onAction: () => context.go('/insulin'),
+                c: c,
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: _HealthStat(
+                      icon: Icons.water_drop_outlined,
+                      label: 'Blood sugar',
+                      value: latestBloodSugar.isEmpty
+                          ? 'No logs'
+                          : '${latestBloodSugar.first.level.round()} ${latestBloodSugar.first.unit}',
+                      c: c,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _HealthStat(
+                      icon: Icons.vaccines_outlined,
+                      label: 'Insulin usage',
+                      value: latestInsulinUsage.isEmpty
+                          ? 'No logs'
+                          : '${_formatNumber(latestInsulinUsage.first.units)} units',
+                      c: c,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 18),
             Text(
               'Add',
               style: TextStyle(
@@ -73,7 +151,7 @@ class HomeScreen extends ConsumerWidget {
               ),
             ),
             const SizedBox(height: 10),
-            _QuickActions(c: c),
+            _QuickActions(c: c, healthEnabled: cfg.healthEnabled),
             const SizedBox(height: 20),
             _SectionHeader(
               title: 'Sources',
@@ -109,39 +187,6 @@ class HomeScreen extends ConsumerWidget {
                   ),
                 ),
               ),
-            const SizedBox(height: 14),
-            _SectionHeader(
-              title: 'Health',
-              action: 'Diabetic',
-              onAction: () => context.go('/insulin'),
-              c: c,
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: _HealthStat(
-                    icon: Icons.water_drop_outlined,
-                    label: 'Blood sugar',
-                    value: latestBloodSugar.isEmpty
-                        ? 'No logs'
-                        : '${latestBloodSugar.first.level.round()} ${latestBloodSugar.first.unit}',
-                    c: c,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _HealthStat(
-                    icon: Icons.vaccines_outlined,
-                    label: 'Insulin usage',
-                    value: latestInsulinUsage.isEmpty
-                        ? 'No logs'
-                        : '${_formatNumber(latestInsulinUsage.first.units)} units',
-                    c: c,
-                  ),
-                ),
-              ],
-            ),
           ],
         );
       },
@@ -161,22 +206,27 @@ class _SourceBalance {
   const _SourceBalance({required this.source, required this.balance});
 }
 
+/// Everything owned: liquid source balances plus what the investments are
+/// currently worth. The two halves are broken out underneath by
+/// [_BreakdownTile], since they behave very differently.
 class _NetWorthPanel extends StatelessWidget {
-  final double totalNetWorth;
+  final double netWorth;
   final int sourceCount;
+  final int holdingCount;
   final String currency;
   final AppColors c;
 
   const _NetWorthPanel({
-    required this.totalNetWorth,
+    required this.netWorth,
     required this.sourceCount,
+    required this.holdingCount,
     required this.currency,
     required this.c,
   });
 
   @override
   Widget build(BuildContext context) {
-    final positive = totalNetWorth >= 0;
+    final positive = netWorth >= 0;
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -189,7 +239,7 @@ class _NetWorthPanel extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.account_balance_wallet_outlined, color: c.accent),
+              Icon(Icons.savings_outlined, color: c.accent),
               const SizedBox(width: 8),
               Text(
                 'Net worth',
@@ -203,7 +253,7 @@ class _NetWorthPanel extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           Text(
-            fmtRp(totalNetWorth, currency),
+            fmtRp(netWorth, currency),
             style: TextStyle(
               color: positive ? c.ink : c.neg,
               fontSize: 34,
@@ -213,7 +263,8 @@ class _NetWorthPanel extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            '$sourceCount finance sources included',
+            '$sourceCount source${sourceCount == 1 ? '' : 's'} + '
+            '$holdingCount investment${holdingCount == 1 ? '' : 's'}',
             style: TextStyle(color: c.muted, fontSize: 12),
           ),
         ],
@@ -222,10 +273,91 @@ class _NetWorthPanel extends StatelessWidget {
   }
 }
 
+/// One half of the net worth figure, opening the page that owns it.
+class _BreakdownTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final String hint;
+
+  /// Only liquid can realistically go negative, and it should read as a
+  /// warning when it does.
+  final bool negative;
+  final VoidCallback onTap;
+  final AppColors c;
+
+  const _BreakdownTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.hint,
+    required this.negative,
+    required this.onTap,
+    required this.c,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: c.surface,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: c.line2, width: 0.5),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(icon, size: 15, color: c.muted),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: c.muted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Icon(Icons.chevron_right_rounded, size: 16, color: c.muted),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: negative ? c.neg : c.ink,
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(hint, style: TextStyle(color: c.muted, fontSize: 11)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _QuickActions extends StatelessWidget {
   final AppColors c;
 
-  const _QuickActions({required this.c});
+  /// Drops the two insulin shortcuts when the Diabetic extra feature is off.
+  final bool healthEnabled;
+
+  const _QuickActions({required this.c, required this.healthEnabled});
 
   @override
   Widget build(BuildContext context) {
@@ -235,16 +367,27 @@ class _QuickActions extends StatelessWidget {
         label: 'Transaction',
         onTap: () => context.push(_returnHomeRoute('/add')),
       ),
-      _ActionSpec(
-        icon: Icons.vaccines_outlined,
-        label: 'Insulin usage',
-        onTap: () => context.push(_returnHomeRoute('/insulin/add-usage')),
-      ),
-      _ActionSpec(
-        icon: Icons.bloodtype_outlined,
-        label: 'Blood sugar',
-        onTap: () => context.push(_returnHomeRoute('/insulin/add-blood-sugar')),
-      ),
+      // Photograph a price list, confirm the recognised rows, then land on the
+      // Add-transaction screen with the breakdown filled in.
+      if (ReceiptScanner.isSupported)
+        _ActionSpec(
+          icon: Icons.document_scanner_outlined,
+          label: 'Scan receipt',
+          onTap: () => context.push(_returnHomeRoute('/scan-receipt')),
+        ),
+      if (healthEnabled) ...[
+        _ActionSpec(
+          icon: Icons.vaccines_outlined,
+          label: 'Insulin usage',
+          onTap: () => context.push(_returnHomeRoute('/insulin/add-usage')),
+        ),
+        _ActionSpec(
+          icon: Icons.bloodtype_outlined,
+          label: 'Blood sugar',
+          onTap: () =>
+              context.push(_returnHomeRoute('/insulin/add-blood-sugar')),
+        ),
+      ],
     ];
 
     return Row(

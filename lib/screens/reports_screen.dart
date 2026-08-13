@@ -91,12 +91,33 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
           children: [
             const SizedBox(height: 14),
-            Text('Reports',
-                style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w700,
-                    color: c.ink,
-                    letterSpacing: -0.02)),
+            Row(
+              children: [
+                Expanded(
+                  child: Text('Reports',
+                      style: TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.w700,
+                          color: c.ink,
+                          letterSpacing: -0.02)),
+                ),
+                TextButton.icon(
+                  onPressed: () => context.push('/export'),
+                  icon: Icon(Icons.file_download_outlined,
+                      size: 18, color: c.accent),
+                  label: Text('Export',
+                      style: TextStyle(
+                          color: c.accent,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600)),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 14),
 
             // Month picker

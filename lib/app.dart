@@ -6,12 +6,16 @@ import 'screens/home_screen.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/transactions_screen.dart';
 import 'screens/add_transaction_screen.dart';
+import 'screens/scan_receipt_screen.dart';
 import 'screens/source_detail_screen.dart';
 import 'screens/category_detail_screen.dart';
+import 'screens/investment_screen.dart';
 import 'screens/reports_screen.dart';
+import 'screens/export_screen.dart';
 import 'screens/options_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/activities_screen.dart';
+import 'screens/consumables_screen.dart';
 import 'screens/wishlist_screen.dart';
 import 'screens/routine_transaction_screen.dart';
 import 'screens/insulin_shell.dart';
@@ -42,6 +46,12 @@ final _router = GoRouter(
     if (cfg.isLoggedIn && loc == '/login') {
       return '/';
     }
+    // Diabetic screens stay routable only while the Health extra feature is
+    // on. This also covers deep links and a screen left open when the switch
+    // is flipped, since ConfigService drives `refreshListenable`.
+    if (loc.startsWith('/insulin') && !cfg.healthEnabled) {
+      return '/';
+    }
     return null;
   },
   routes: [
@@ -62,10 +72,15 @@ final _router = GoRouter(
         GoRoute(
             path: '/transactions',
             builder: (c, s) => const TransactionsScreen()),
+        GoRoute(
+            path: '/investments', builder: (c, s) => const InvestmentScreen()),
         GoRoute(path: '/reports', builder: (c, s) => const ReportsScreen()),
+        GoRoute(path: '/export', builder: (c, s) => const ExportScreen()),
         GoRoute(path: '/options', builder: (c, s) => const OptionsScreen()),
         GoRoute(
             path: '/activities', builder: (c, s) => const ActivitiesScreen()),
+        GoRoute(
+            path: '/consumables', builder: (c, s) => const ConsumablesScreen()),
         GoRoute(
             path: '/planned-expenses',
             builder: (c, s) => const WishlistScreen()),
@@ -124,6 +139,18 @@ final _router = GoRouter(
       parentNavigatorKey: _rootKey,
       path: '/add',
       builder: (c, s) => AddTransactionScreen(
+        returnPath: s.uri.queryParameters['returnTo'],
+        // Set when arriving from the receipt scanner: pre-fills the amount,
+        // description and the confirmed line items.
+        draft: s.extra is AddTransactionDraft
+            ? s.extra as AddTransactionDraft
+            : null,
+      ),
+    ),
+    GoRoute(
+      parentNavigatorKey: _rootKey,
+      path: '/scan-receipt',
+      builder: (c, s) => ScanReceiptScreen(
         returnPath: s.uri.queryParameters['returnTo'],
       ),
     ),

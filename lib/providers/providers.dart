@@ -49,7 +49,38 @@ class AppDataNotifier extends AutoDisposeAsyncNotifier<AppData> {
       state = AsyncValue.data(remote);
     }
   }
+
+  /// Backs the manual Refresh button: push anything queued, then make sure the
+  /// server was actually re-read.
+  ///
+  /// [SyncService.syncNow] skips its whole body when a periodic sync is already
+  /// in flight, which is exactly the moment a user reaches for the button - so
+  /// when it reports that it did nothing, the remote read is done here instead.
+  /// That is why tapping Refresh always pulls, rather than sometimes appearing
+  /// to do nothing.
+  Future<RefreshOutcome> refreshFromServer() async {
+    await refreshCached();
+    if (!SyncService.instance.isOnline) return RefreshOutcome.offline;
+    try {
+      if (await SyncService.instance.syncNow()) {
+        return SyncService.instance.status == SyncStatus.error
+            ? RefreshOutcome.failed
+            : RefreshOutcome.refreshed;
+      }
+      final remote = await Repo.instance.refreshRemote();
+      if (remote == null) return RefreshOutcome.offline;
+      state = AsyncValue.data(remote);
+      return RefreshOutcome.refreshed;
+    } catch (_) {
+      // The cached data stays on screen; the outcome drives the message.
+      return RefreshOutcome.failed;
+    }
+  }
 }
+
+/// What a manual refresh managed to do, so the caller can say so plainly
+/// instead of leaving the user guessing whether anything happened.
+enum RefreshOutcome { refreshed, offline, failed }
 
 final appDataProvider =
     AsyncNotifierProvider.autoDispose<AppDataNotifier, AppData>(

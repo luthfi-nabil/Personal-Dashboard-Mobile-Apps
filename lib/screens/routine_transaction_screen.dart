@@ -27,9 +27,6 @@ class RoutineTransactionScreen extends ConsumerWidget {
         final currentMonth = DateTime.now().toIso8601String().substring(0, 7);
         final estimatedMonthly =
             active.fold<double>(0, (sum, item) => sum + _monthlyEstimate(item));
-        final paidThisMonth = data.routinePayments
-            .where((payment) => isoMonth(payment.boughtAt) == currentMonth)
-            .fold<double>(0, (sum, payment) => sum + payment.price);
         final latestPayments = [...data.routinePayments]
           ..sort((a, b) => b.boughtAt.compareTo(a.boughtAt));
         final reminderMix = _reminderSummary(active);
@@ -43,6 +40,13 @@ class RoutineTransactionScreen extends ConsumerWidget {
                 item.reminder == 'monthly' &&
                 !paidRoutineIdsThisMonth.contains(item.id))
             .toList();
+        // What is still owed this month: the share of the monthly estimate
+        // belonging to routines that have not been paid yet. Anything already
+        // paid this month contributes nothing, so this counts down to zero as
+        // the month is worked through.
+        final remainingThisMonth = active
+            .where((item) => !paidRoutineIdsThisMonth.contains(item.id))
+            .fold<double>(0, (sum, item) => sum + _monthlyEstimate(item));
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
           children: [
@@ -66,7 +70,7 @@ class RoutineTransactionScreen extends ConsumerWidget {
             const SizedBox(height: 12),
             _RoutineReports(
               estimatedMonthly: estimatedMonthly,
-              paidThisMonth: paidThisMonth,
+              remainingThisMonth: remainingThisMonth,
               activeCount: active.length,
               latestPayment:
                   latestPayments.isEmpty ? null : latestPayments.first,
@@ -219,7 +223,9 @@ InputDecoration _fieldDecoration(AppColors c, String label) => InputDecoration(
 
 class _RoutineReports extends StatelessWidget {
   final double estimatedMonthly;
-  final double paidThisMonth;
+
+  /// Of [estimatedMonthly], how much belongs to routines still unpaid.
+  final double remainingThisMonth;
   final int activeCount;
   final RoutinePayment? latestPayment;
   final String reminderMix;
@@ -229,7 +235,7 @@ class _RoutineReports extends StatelessWidget {
 
   const _RoutineReports({
     required this.estimatedMonthly,
-    required this.paidThisMonth,
+    required this.remainingThisMonth,
     required this.activeCount,
     required this.latestPayment,
     required this.reminderMix,
@@ -258,9 +264,11 @@ class _RoutineReports extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: _MetricTile(
-                label: 'Paid this month',
-                value: fmtRp(paidThisMonth, currency),
-                color: c.neg,
+                label: 'Expense remaining',
+                value: fmtRp(remainingThisMonth, currency),
+                // Nothing left to pay is good news, so it stops reading as an
+                // outstanding cost once the month is cleared.
+                color: remainingThisMonth > 0 ? c.neg : c.pos,
                 c: c,
               ),
             ),

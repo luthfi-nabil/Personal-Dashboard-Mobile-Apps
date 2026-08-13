@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:uuid/uuid.dart';
 import 'db.dart';
 import 'config.dart';
@@ -79,6 +81,9 @@ class Repo {
       AppDb.instance.getPendingInsulinUsages(userId),
       AppDb.instance.getPendingDeletes(userId),
       AppDb.instance.getPendingBloodSugarLogs(userId),
+      AppDb.instance.getPendingTransactionDetails(userId),
+      AppDb.instance.getPendingConsumables(userId),
+      AppDb.instance.getPendingInvestments(userId),
     ]);
     final pendingSources = results[0] as List<Source>;
     final pendingCategories = results[1] as List<Category>;
@@ -91,6 +96,9 @@ class Repo {
     final pendingInsulinUsages = results[8] as List<InsulinUsage>;
     final pendingDeletes = results[9] as List<PendingDelete>;
     final pendingBloodSugarLogs = results[10] as List<BloodSugarLog>;
+    final pendingTransactionDetails = results[11] as List<TransactionDetail>;
+    final pendingConsumables = results[12] as List<Consumable>;
+    final pendingInvestments = results[13] as List<Investment>;
     if (results.every((rows) => rows.isEmpty)) return data;
 
     List<T> mergePending<T>(
@@ -174,13 +182,31 @@ class Repo {
       data.bloodSugarLogs,
       (log) => log.id,
     )..sort((a, b) => b.measuredAt.compareTo(a.measuredAt));
+    final transactionDetails = mergePending(
+      pendingTransactionDetails,
+      data.transactionDetails,
+      (detail) => detail.id,
+    );
+    final consumables = mergePending(
+      pendingConsumables,
+      data.consumables,
+      (item) => item.id,
+    )..sort((a, b) => b.inDate.compareTo(a.inDate));
+    final investments = mergePending(
+      pendingInvestments,
+      data.investments,
+      (item) => item.id,
+    )..sort((a, b) => b.acquiredDate.compareTo(a.acquiredDate));
     return AppData(
       sources: sources,
       categories: categories,
       transactions: transactions,
+      transactionDetails: transactionDetails,
       wishlistItems: wishlistItems,
       routineTransactions: routineTransactions,
       routinePayments: routinePayments,
+      consumables: consumables,
+      investments: investments,
       insulinItems: insulinItems,
       insulinAssigns: insulinAssigns,
       insulinUsages: insulinUsages,
@@ -200,6 +226,9 @@ class Repo {
       AppDb.instance.getInsulinAssigns(userId),
       AppDb.instance.getInsulinUsages(userId),
       AppDb.instance.getBloodSugarLogs(userId),
+      AppDb.instance.getTransactionDetails(userId),
+      AppDb.instance.getConsumables(userId),
+      AppDb.instance.getInvestments(userId),
     ]);
     return AppData(
       sources: results[0] as List<Source>,
@@ -212,6 +241,9 @@ class Repo {
       insulinAssigns: results[7] as List<InsulinAssign>,
       insulinUsages: results[8] as List<InsulinUsage>,
       bloodSugarLogs: results[9] as List<BloodSugarLog>,
+      transactionDetails: results[10] as List<TransactionDetail>,
+      consumables: results[11] as List<Consumable>,
+      investments: results[12] as List<Investment>,
     );
   }
 
@@ -239,15 +271,57 @@ class Repo {
     final rawRoutines = results[7];
     final rawRoutinePayments = results[8];
 
+    // Line items are best-effort: an older transaction-api without
+    // /api/user/spending-details must not break the whole refresh. On failure
+    // keep whatever is cached locally rather than wiping the breakdowns.
+    List<TransactionDetail>? fetchedDetails;
+    try {
+      fetchedDetails = (await api.getSpendingDetails())
+          .map(TransactionDetail.fromApi)
+          .toList();
+    } catch (_) {
+      fetchedDetails = null;
+    }
+    final transactionDetails = fetchedDetails ??
+        await AppDb.instance.getTransactionDetails(cfg.userId);
+
+    // Same treatment for consumables: an older transaction-api without
+    // /api/user/consumables must not take the whole refresh down with it.
+    List<Consumable>? fetchedConsumables;
+    try {
+      fetchedConsumables =
+          (await api.getConsumables()).map(Consumable.fromApi).toList();
+    } catch (_) {
+      fetchedConsumables = null;
+    }
+    final consumables =
+        fetchedConsumables ?? await AppDb.instance.getConsumables(cfg.userId);
+
+    // And for investments, which an API older than the Investment page does
+    // not serve at all.
+    List<Investment>? fetchedInvestments;
+    try {
+      fetchedInvestments =
+          (await api.getInvestments()).map(Investment.fromApi).toList();
+    } catch (_) {
+      fetchedInvestments = null;
+    }
+    final investments =
+        fetchedInvestments ?? await AppDb.instance.getInvestments(cfg.userId);
+
     String? transferCategoryName;
     try {
-      for (final s in await api.getSettings()) {
+      final settings = await api.getSettings();
+      for (final s in settings) {
         if (s['app_setting_key'] == 'TRANSFER_CATEGORY_NAME') {
           transferCategoryName = s['app_setting_value'] as String?;
         }
       }
+      // Same payload carries the account's FEATURE_* flags, so this is where
+      // a toggle made on another device lands.
+      await ConfigService.instance.applyRemoteSettings(settings);
     } catch (_) {
-      // transfer pairing is best-effort
+      // transfer pairing and flag sync are both best-effort
     }
 
     final existingKinds = {
@@ -328,9 +402,12 @@ class Repo {
       sources: sources,
       categories: categories,
       transactions: transactions,
+      transactionDetails: transactionDetails,
       wishlistItems: wishlistItems,
       routineTransactions: routineTransactions,
       routinePayments: routinePayments,
+      consumables: consumables,
+      investments: investments,
       insulinItems: insulinItems,
       insulinAssigns: insulinAssigns,
       insulinUsages: insulinUsages,
@@ -444,10 +521,14 @@ class Repo {
     await AppDb.instance.replaceSources(data.sources, userId);
     await AppDb.instance.replaceCategories(data.categories, userId);
     await AppDb.instance.replaceTransactions(data.transactions, userId);
+    await AppDb.instance
+        .replaceTransactionDetails(data.transactionDetails, userId);
     await AppDb.instance.replaceWishlistItems(data.wishlistItems, userId);
     await AppDb.instance
         .replaceRoutineTransactions(data.routineTransactions, userId);
     await AppDb.instance.replaceRoutinePayments(data.routinePayments, userId);
+    await AppDb.instance.replaceConsumables(data.consumables, userId);
+    await AppDb.instance.replaceInvestments(data.investments, userId);
     await AppDb.instance.replaceInsulinItems(data.insulinItems, userId);
     await AppDb.instance.replaceInsulinAssigns(data.insulinAssigns, userId);
     await AppDb.instance.replaceInsulinUsages(data.insulinUsages, userId);
@@ -564,6 +645,9 @@ class Repo {
     required Category category,
     required Source source,
   }) async {
+    // Stamped once, before the API is even tried, so the transaction carries
+    // the moment it was entered whichever branch it takes.
+    final enteredAt = _nowGmtPlus7Iso();
     try {
       await _withTokenRefresh(() => RemoteApi(_cfg).createEarning(
             totalAmount: amount,
@@ -572,6 +656,7 @@ class Repo {
             earningCategory: category.name,
             sourceId: source.id,
             source: source.name,
+            createdDate: enteredAt,
           ));
       return false;
     } on ApiUnavailableException {
@@ -582,7 +667,7 @@ class Repo {
         description: description,
         category: category.name,
         source: source.name,
-        date: _nowIso(),
+        date: enteredAt,
         syncState: 'pending',
         updatedAt: _nowIso(),
       ));
@@ -590,12 +675,20 @@ class Repo {
     }
   }
 
+  /// Creates a spending, optionally with a line-item breakdown ([details]).
+  /// Details come from the Add-transaction screen's item editor, which the
+  /// receipt scanner pre-fills from a recognised price list.
+  ///
+  /// Returns `true` when the API was unreachable and the transaction (with its
+  /// details) was queued locally instead.
   Future<bool> createSpending({
     required double amount,
     required String description,
     required Category category,
     required Source source,
+    List<TransactionDetail> details = const [],
   }) async {
+    final enteredAt = _nowGmtPlus7Iso();
     try {
       await _withTokenRefresh(() => RemoteApi(_cfg).createSpending(
             totalAmount: amount,
@@ -604,22 +697,104 @@ class Repo {
             spendingCategory: category.name,
             sourceId: source.id,
             source: source.name,
+            details: details.map((d) => d.toApiPayload()).toList(),
+            createdDate: enteredAt,
           ));
       return false;
     } on ApiUnavailableException {
+      final localId = _uuid.v4();
       await _queuePending(Transaction(
-        id: _uuid.v4(),
+        id: localId,
         type: 'spending',
         amount: amount,
         description: description,
         category: category.name,
         source: source.name,
-        date: _nowIso(),
+        date: enteredAt,
         syncState: 'pending',
         updatedAt: _nowIso(),
       ));
+      await _queuePendingDetails(localId, details);
       return true;
     }
+  }
+
+  /// Stores [details] against a locally-queued transaction so the breakdown
+  /// survives until the parent spending is pushed to the server.
+  Future<void> _queuePendingDetails(
+      String transactionId, List<TransactionDetail> details) async {
+    if (details.isEmpty) return;
+    await AppDb.instance.putTransactionDetails(
+      details
+          .map((d) => d.copyWith(
+                id: d.id.isEmpty ? _uuid.v4() : d.id,
+                transactionId: transactionId,
+                syncState: 'pending',
+                updatedAt: _nowIso(),
+              ))
+          .toList(),
+      _userId,
+    );
+  }
+
+  /// Line items for [transactionId], read straight from the local cache.
+  Future<List<TransactionDetail>> getTransactionDetails(
+          String transactionId) async =>
+      AppDb.instance.getTransactionDetailsFor(transactionId, _userId);
+
+  /// Ticks or unticks one line item.
+  ///
+  /// Only the local write is awaited, so the checkbox never waits on the
+  /// network. A detail still queued with its parent spending keeps
+  /// `syncState: 'pending'` and will be created with the right tick; a synced
+  /// one is pushed in the background and, if that fails, left as `'checkDirty'`
+  /// for [syncPendingDetailChecks] to retry.
+  Future<void> setTransactionDetailChecked(
+      TransactionDetail detail, bool checked) async {
+    if (detail.syncState == 'pending') {
+      await AppDb.instance
+          .setTransactionDetailChecked(detail.id, _userId, checked, 'pending');
+      return;
+    }
+
+    // Written as unpushed up front: if the app dies mid-request the tick is
+    // still queued rather than silently lost.
+    final userId = _userId;
+    await AppDb.instance
+        .setTransactionDetailChecked(detail.id, userId, checked, 'checkDirty');
+    unawaited(() async {
+      try {
+        await _withTokenRefresh(() => RemoteApi(_cfg)
+            .setSpendingDetailChecked(id: detail.id, checked: checked));
+        await AppDb.instance
+            .setTransactionDetailChecked(detail.id, userId, checked, 'synced');
+      } catch (_) {
+        // Leave the row dirty for syncPendingDetailChecks to retry.
+      }
+      await _refreshPendingCount();
+    }());
+  }
+
+  /// Pushes ticks that were changed while the API was unreachable.
+  Future<void> syncPendingDetailChecks() async {
+    final cfg = _cfg;
+    final dirty = await AppDb.instance.getDirtyTransactionDetails(cfg.userId);
+    if (dirty.isEmpty) return;
+
+    final remote = RemoteApi(cfg);
+    for (final detail in dirty) {
+      try {
+        await remote.setSpendingDetailChecked(
+            id: detail.id, checked: detail.checked);
+        await AppDb.instance.setTransactionDetailChecked(
+            detail.id, cfg.userId, detail.checked, 'synced');
+      } catch (_) {
+        // Still unreachable, or the item is gone server-side. Leave the row
+        // dirty and retry on the next sync.
+      }
+    }
+
+    await _refreshPendingCount();
   }
 
   /// Creates a transfer as a paired spending (fromSource) + earning
@@ -630,6 +805,7 @@ class Repo {
     required Source fromSource,
     required Source toSource,
   }) async {
+    final enteredAt = _nowGmtPlus7Iso();
     try {
       await _withTokenRefresh(() async {
         final remote = RemoteApi(_cfg);
@@ -648,6 +824,8 @@ class Repo {
           throw const ApiException(
               'Transfer category is not configured on the server.');
         }
+        // Both halves carry the same stamp, which is also what keeps
+        // [_pairTransfers] recombining them into one transfer on read.
         await remote.createSpending(
           totalAmount: amount,
           description: description,
@@ -655,6 +833,7 @@ class Repo {
           spendingCategory: catName,
           sourceId: fromSource.id,
           source: fromSource.name,
+          createdDate: enteredAt,
         );
         await remote.createEarning(
           totalAmount: amount,
@@ -663,6 +842,7 @@ class Repo {
           earningCategory: catName,
           sourceId: toSource.id,
           source: toSource.name,
+          createdDate: enteredAt,
         );
       });
       return false;
@@ -674,7 +854,7 @@ class Repo {
         description: description,
         fromSource: fromSource.name,
         toSource: toSource.name,
-        date: _nowIso(),
+        date: enteredAt,
         syncState: 'pending',
         updatedAt: _nowIso(),
       ));
@@ -713,7 +893,9 @@ class Repo {
     String? notes,
     required String priority,
   }) async {
-    final now = _nowIso();
+    // Stamped once, before the API is even tried, so the item carries the
+    // moment it was entered whichever branch it takes.
+    final enteredAt = _nowGmtPlus7Iso();
     final item = WishlistItem(
       id: _uuid.v4(),
       itemName: itemName,
@@ -723,8 +905,8 @@ class Repo {
       categoryName: category.name,
       notes: notes,
       priority: priority,
-      createdDate: now,
-      updatedAt: now,
+      createdDate: enteredAt,
+      updatedAt: _nowIso(),
     );
     try {
       final m = await _withTokenRefresh(() => RemoteApi(_cfg).createWishlist(
@@ -736,6 +918,7 @@ class Repo {
             categoryName: category.name,
             notes: notes,
             priority: priority,
+            createdDate: enteredAt,
           ));
       final synced = WishlistItem.fromMap(m);
       await AppDb.instance.putWishlistItem(synced, _userId);
@@ -767,10 +950,11 @@ class Repo {
             category: category,
             source: source,
           );
+    final fulfilledAt = _nowGmtPlus7Iso();
     final updated = item.copyWith(
       status: 'fulfilled',
       fulfilledPrice: price,
-      fulfilledAt: _nowIso(),
+      fulfilledAt: fulfilledAt,
       updatedAt: _nowIso(),
       syncState: 'pending',
     );
@@ -780,6 +964,7 @@ class Repo {
             id: item.id,
             status: 'fulfilled',
             fulfilledPrice: price,
+            changedAt: fulfilledAt,
           ));
       await AppDb.instance
           .putWishlistItem(updated.copyWith(syncState: 'synced'), _userId);
@@ -833,6 +1018,7 @@ class Repo {
             categoryName: updated.categoryName,
             notes: updated.notes,
             priority: updated.priority,
+            createdDate: updated.createdDate,
           ));
       await AppDb.instance
           .putWishlistItem(updated.copyWith(syncState: 'synced'), _userId);
@@ -843,16 +1029,17 @@ class Repo {
   }
 
   Future<void> cancelWishlistItem(WishlistItem item) async {
+    final canceledAt = _nowGmtPlus7Iso();
     final updated = item.copyWith(
       status: 'canceled',
-      canceledAt: _nowIso(),
+      canceledAt: canceledAt,
       updatedAt: _nowIso(),
       syncState: 'pending',
     );
     await AppDb.instance.putWishlistItem(updated, _userId);
     try {
-      await _withTokenRefresh(() => RemoteApi(_cfg)
-          .updateWishlistStatus(id: item.id, status: 'canceled'));
+      await _withTokenRefresh(() => RemoteApi(_cfg).updateWishlistStatus(
+          id: item.id, status: 'canceled', changedAt: canceledAt));
       await AppDb.instance
           .putWishlistItem(updated.copyWith(syncState: 'synced'), _userId);
     } on ApiUnavailableException {
@@ -869,6 +1056,207 @@ class Repo {
     }
   }
 
+  // ── Consumables ──────────────────────────────────────────────────────
+  /// Adds [count] units of the same thing, each as its own record.
+  ///
+  /// Buying a three-pack of shampoo makes three units (1/3, 2/3, 3/3) that
+  /// share a name and price but run out on their own dates. [transactionId] /
+  /// [transactionDetailId] are set when the units came from a transaction's
+  /// line item, so the page can point back at the purchase.
+  Future<List<Consumable>> addConsumables({
+    required String itemName,
+    int count = 1,
+    String notes = '',
+    double price = 0,
+    String inDate = '',
+    String transactionId = '',
+    String transactionDetailId = '',
+  }) async {
+    final now = _nowIso();
+    final total = count < 1 ? 1 : count;
+    final units = [
+      for (var i = 0; i < total; i++)
+        Consumable(
+          id: _uuid.v4(),
+          itemName: itemName,
+          notes: notes,
+          unitIndex: i + 1,
+          unitTotal: total,
+          price: price,
+          inDate: inDate.isEmpty ? now : inDate,
+          transactionId: transactionId,
+          transactionDetailId: transactionDetailId,
+          updatedAt: now,
+        ),
+    ];
+    for (final unit in units) {
+      await _saveConsumable(unit);
+    }
+    return units;
+  }
+
+  /// Records the date a unit ran out, or puts it back in use when [outDate] is
+  /// empty.
+  Future<void> setConsumableOutDate(Consumable unit, String outDate) async {
+    final updated =
+        unit.copyWith(outDate: outDate, updatedAt: _nowIso());
+    await AppDb.instance
+        .putConsumable(updated.copyWith(syncState: 'pending'), _userId);
+    try {
+      await _withTokenRefresh(() => RemoteApi(_cfg).setConsumableOutDate(
+            id: unit.id,
+            outDate: outDate.isEmpty ? null : outDate,
+          ));
+      await AppDb.instance
+          .putConsumable(updated.copyWith(syncState: 'synced'), _userId);
+    } on ApiUnavailableException {
+      // Left pending: the queued write re-posts the whole unit, and the API
+      // upserts it, so the out date lands either way.
+      await _refreshPendingCount();
+    }
+  }
+
+  Future<void> removeConsumable(Consumable unit) async {
+    await AppDb.instance.deleteConsumable(unit.id, _userId);
+    try {
+      await _withTokenRefresh(
+          () => RemoteApi(_cfg).deleteConsumable(unit.id));
+    } on ApiUnavailableException {
+      await AppDb.instance.putPendingDelete(
+        PendingDelete(
+          id: unit.id,
+          resource: 'consumable',
+          updatedAt: _nowIso(),
+        ),
+        _userId,
+      );
+      await _refreshPendingCount();
+    }
+  }
+
+  /// Writes one unit through to the API, queuing it locally when the API is
+  /// unreachable. `POST /consumables` upserts on the client-generated id, so a
+  /// retry can never duplicate a unit.
+  Future<void> _saveConsumable(Consumable unit) async {
+    try {
+      await _withTokenRefresh(
+          () => RemoteApi(_cfg).createConsumable(unit.toApiPayload()));
+      await AppDb.instance
+          .putConsumable(unit.copyWith(syncState: 'synced'), _userId);
+    } on ApiUnavailableException {
+      await AppDb.instance
+          .putConsumable(unit.copyWith(syncState: 'pending'), _userId);
+      await _refreshPendingCount();
+    }
+  }
+
+  // ── Investments ──────────────────────────────────────────────────────
+  /// Records a new holding, or rewrites an existing one when [id] is given.
+  ///
+  /// [lastUnitPrice] is left null for a fresh holding: until the first price
+  /// refresh (metal) or manual NAB update (fund), the buy price is the best
+  /// value known, and the API falls back to it.
+  Future<Investment> saveInvestment({
+    String? id,
+    required InvestmentKind kind,
+    required String name,
+    String provider = '',
+    required double units,
+    required double buyUnitPrice,
+    double? lastUnitPrice,
+    String priceSource = '',
+    String priceUpdatedAt = '',
+    String notes = '',
+    String acquiredDate = '',
+  }) async {
+    final now = _nowIso();
+    final item = Investment(
+      id: id ?? _uuid.v4(),
+      kind: kind,
+      name: name,
+      provider: provider,
+      units: units,
+      buyUnitPrice: buyUnitPrice,
+      lastUnitPrice: lastUnitPrice ?? buyUnitPrice,
+      priceSource: priceSource,
+      priceUpdatedAt: priceUpdatedAt,
+      notes: notes,
+      acquiredDate: acquiredDate.isEmpty ? now : acquiredDate,
+      updatedAt: now,
+    );
+    await _saveInvestment(item);
+    return item;
+  }
+
+  /// Records a fresh valuation for one holding - a NAB read off a broker app,
+  /// or a gold/silver price pulled from a price API by [MetalPriceService].
+  ///
+  /// Uses the dedicated price route rather than a full upsert so units and
+  /// cost basis stay untouched even if the price is wrong.
+  Future<void> updateInvestmentPrice(
+    Investment item, {
+    required double lastUnitPrice,
+    String priceSource = '',
+    String? priceUpdatedAt,
+  }) async {
+    final stamp = priceUpdatedAt ?? _nowIso();
+    final updated = item.copyWith(
+      lastUnitPrice: lastUnitPrice,
+      priceSource: priceSource,
+      priceUpdatedAt: stamp,
+      updatedAt: _nowIso(),
+    );
+    await AppDb.instance
+        .putInvestment(updated.copyWith(syncState: 'pending'), _userId);
+    try {
+      await _withTokenRefresh(() => RemoteApi(_cfg).updateInvestmentPrice(
+            id: item.id,
+            lastUnitPrice: lastUnitPrice,
+            priceSource: priceSource,
+            priceUpdatedAt: stamp,
+          ));
+      await AppDb.instance
+          .putInvestment(updated.copyWith(syncState: 'synced'), _userId);
+    } on ApiUnavailableException {
+      // Left pending: the queued write re-posts the whole holding and the API
+      // upserts it, so the price lands either way.
+      await _refreshPendingCount();
+    }
+  }
+
+  Future<void> removeInvestment(Investment item) async {
+    await AppDb.instance.deleteInvestment(item.id, _userId);
+    try {
+      await _withTokenRefresh(() => RemoteApi(_cfg).deleteInvestment(item.id));
+    } on ApiUnavailableException {
+      await AppDb.instance.putPendingDelete(
+        PendingDelete(
+          id: item.id,
+          resource: 'investment',
+          updatedAt: _nowIso(),
+        ),
+        _userId,
+      );
+      await _refreshPendingCount();
+    }
+  }
+
+  /// Writes one holding through to the API, queuing it locally when the API is
+  /// unreachable. `POST /investments` upserts on the client-generated id, so a
+  /// retry can never duplicate a holding.
+  Future<void> _saveInvestment(Investment item) async {
+    try {
+      await _withTokenRefresh(
+          () => RemoteApi(_cfg).createInvestment(item.toApiPayload()));
+      await AppDb.instance
+          .putInvestment(item.copyWith(syncState: 'synced'), _userId);
+    } on ApiUnavailableException {
+      await AppDb.instance
+          .putInvestment(item.copyWith(syncState: 'pending'), _userId);
+      await _refreshPendingCount();
+    }
+  }
+
   // Routine transactions
   Future<RoutineTransaction> createRoutineTransaction({
     required String itemName,
@@ -876,7 +1264,7 @@ class Repo {
     required String reminder,
     required Category category,
   }) async {
-    final now = _nowIso();
+    final enteredAt = _nowGmtPlus7Iso();
     final item = RoutineTransaction(
       id: _uuid.v4(),
       itemName: itemName,
@@ -884,8 +1272,8 @@ class Repo {
       reminder: reminder,
       categoryId: category.id,
       categoryName: category.name,
-      createdDate: now,
-      updatedAt: now,
+      createdDate: enteredAt,
+      updatedAt: _nowIso(),
     );
     try {
       final m = await _withTokenRefresh(() => RemoteApi(_cfg).createRoutine(
@@ -895,6 +1283,7 @@ class Repo {
             reminder: reminder,
             spendingCategoryId: category.id,
             spendingCategory: category.name,
+            createdDate: enteredAt,
           ));
       final synced = RoutineTransaction.fromMap(m);
       await AppDb.instance.putRoutineTransaction(synced, _userId);
@@ -934,7 +1323,7 @@ class Repo {
       categoryName: routine.categoryName,
       sourceId: source.id,
       sourceName: source.name,
-      boughtAt: _nowIso(),
+      boughtAt: _nowGmtPlus7Iso(),
       syncState: 'pending',
     );
     await AppDb.instance.putRoutinePayment(payment, _userId);
@@ -950,6 +1339,7 @@ class Repo {
                 price: price,
                 sourceId: source.id,
                 source: source.name,
+                boughtAt: payment.boughtAt,
               ));
       await AppDb.instance
           .putRoutinePayment(RoutinePayment.fromMap(m), _userId);
@@ -1366,6 +1756,9 @@ class Repo {
     final sources = await AppDb.instance.getSources(cfg.userId);
     final categories = await AppDb.instance.getCategories(cfg.userId);
 
+    // Every push carries `t.date` - the moment the transaction was entered on
+    // the device - so the server stores that instead of stamping the row with
+    // the time sync happened to run.
     for (final t in pending) {
       try {
         switch (t.type) {
@@ -1380,12 +1773,17 @@ class Repo {
               earningCategory: cat.name,
               sourceId: src.id,
               source: src.name,
+              createdDate: t.date,
             );
             break;
           case 'spending':
             final cat = categories.firstWhere(
                 (c) => c.kind == 'spending' && c.name == t.category);
             final src = sources.firstWhere((s) => s.name == t.source);
+            // Ship the queued line items along with their parent spending so
+            // the server rebuilds the same breakdown under its own ids.
+            final queuedDetails =
+                await AppDb.instance.getTransactionDetailsFor(t.id, cfg.userId);
             await remote.createSpending(
               totalAmount: t.amount,
               description: t.description,
@@ -1393,6 +1791,8 @@ class Repo {
               spendingCategory: cat.name,
               sourceId: src.id,
               source: src.name,
+              details: queuedDetails.map((d) => d.toApiPayload()).toList(),
+              createdDate: t.date,
             );
             break;
           case 'transfer':
@@ -1420,6 +1820,7 @@ class Repo {
               spendingCategory: catName,
               sourceId: from.id,
               source: from.name,
+              createdDate: t.date,
             );
             await remote.createEarning(
               totalAmount: t.amount,
@@ -1428,6 +1829,7 @@ class Repo {
               earningCategory: catName,
               sourceId: to.id,
               source: to.name,
+              createdDate: t.date,
             );
             break;
         }
@@ -1468,6 +1870,12 @@ class Repo {
           case 'insulin_usage':
             await remote.deleteInsulinUsage(item.id);
             break;
+          case 'consumable':
+            await remote.deleteConsumable(item.id);
+            break;
+          case 'investment':
+            await remote.deleteInvestment(item.id);
+            break;
           default:
             await AppDb.instance.deletePendingDelete(item, cfg.userId);
             continue;
@@ -1500,12 +1908,17 @@ class Repo {
           categoryName: item.categoryName,
           notes: item.notes,
           priority: item.priority,
+          // Queued rows carry the moment they were entered / flipped on the
+          // device, so a late push does not restamp them with the sync time.
+          createdDate: item.createdDate,
         );
         if (item.status != 'active') {
           await remote.updateWishlistStatus(
             id: item.id,
             status: item.status,
             fulfilledPrice: item.fulfilledPrice,
+            changedAt:
+                item.status == 'fulfilled' ? item.fulfilledAt : item.canceledAt,
           );
         }
         await AppDb.instance
@@ -1527,6 +1940,7 @@ class Repo {
           reminder: item.reminder,
           spendingCategoryId: item.categoryId,
           spendingCategory: item.categoryName,
+          createdDate: item.createdDate,
         );
         await AppDb.instance.putRoutineTransaction(
             item.copyWith(syncState: 'synced'), cfg.userId);
@@ -1546,9 +1960,38 @@ class Repo {
           price: payment.price,
           sourceId: payment.sourceId,
           source: payment.sourceName,
+          boughtAt: payment.boughtAt,
         );
         await AppDb.instance.putRoutinePayment(
             payment.copyWith(syncState: 'synced'), cfg.userId);
+      } on ApiUnavailableException {
+        break;
+      } catch (_) {
+        // Keep the pending row for a later retry.
+      }
+    }
+
+    // Consumables are upserted on their client-generated id, so one call
+    // covers both a unit created offline and one whose out date changed there.
+    for (final unit in await AppDb.instance.getPendingConsumables(cfg.userId)) {
+      try {
+        await remote.createConsumable(unit.toApiPayload());
+        await AppDb.instance
+            .putConsumable(unit.copyWith(syncState: 'synced'), cfg.userId);
+      } on ApiUnavailableException {
+        break;
+      } catch (_) {
+        // Keep the pending row for a later retry.
+      }
+    }
+
+    // Investments upsert on their client-generated id too, so one call covers
+    // a holding created offline and one whose price was refreshed there.
+    for (final item in await AppDb.instance.getPendingInvestments(cfg.userId)) {
+      try {
+        await remote.createInvestment(item.toApiPayload());
+        await AppDb.instance
+            .putInvestment(item.copyWith(syncState: 'synced'), cfg.userId);
       } on ApiUnavailableException {
         break;
       } catch (_) {
@@ -1566,9 +2009,14 @@ class Repo {
     required String uom,
     String? notes,
   }) async {
+    final enteredAt = _nowGmtPlus7Iso();
     try {
-      final m = await _withTokenRefresh(() => RemoteApi(_cfg)
-          .createInsulinItem(name: name, units: units, uom: uom, notes: notes));
+      final m = await _withTokenRefresh(() => RemoteApi(_cfg).createInsulinItem(
+          name: name,
+          units: units,
+          uom: uom,
+          notes: notes,
+          createdAt: enteredAt));
       final item = InsulinItem.fromMap(m);
       await AppDb.instance.putInsulinItem(item, _userId);
       return item;
@@ -1578,7 +2026,7 @@ class Repo {
         name: name,
         units: units,
         uom: uom,
-        date: _nowIso(),
+        date: enteredAt,
         notes: notes,
         syncState: 'pending',
       );
@@ -1593,10 +2041,14 @@ class Repo {
     required String batchNo,
     String? notes,
   }) async {
+    final enteredAt = _nowGmtPlus7Iso();
     try {
       final m = await _withTokenRefresh(() => RemoteApi(_cfg)
           .createInsulinAssign(
-              insulinItemId: itemId, batchNo: batchNo, notes: notes));
+              insulinItemId: itemId,
+              batchNo: batchNo,
+              notes: notes,
+              addedAt: enteredAt));
       final assign = InsulinAssign.fromMap(m);
       await AppDb.instance.putInsulinAssign(assign, _userId);
       return assign;
@@ -1606,7 +2058,7 @@ class Repo {
         id: _uuid.v4(),
         itemId: itemId,
         batchNo: batchNo,
-        date: _nowIso(),
+        date: enteredAt,
         itemName: item?.name ?? '',
         totalUnits: item?.units ?? 0,
         notes: notes,
@@ -1626,10 +2078,14 @@ class Repo {
     required double units,
     String? notes,
   }) async {
+    final enteredAt = _nowGmtPlus7Iso();
     try {
       final m = await _withTokenRefresh(() => RemoteApi(_cfg)
           .createInsulinUsage(
-              insulinAssignId: assignId, units: units, notes: notes));
+              insulinAssignId: assignId,
+              units: units,
+              notes: notes,
+              administeredAt: enteredAt));
       final usage = InsulinUsage.fromMap(m);
       await AppDb.instance.putInsulinUsage(usage, _userId);
       return usage;
@@ -1638,7 +2094,7 @@ class Repo {
         id: _uuid.v4(),
         assignId: assignId,
         units: units,
-        date: _nowGmtPlus7Iso(),
+        date: enteredAt,
         notes: notes,
         syncState: 'pending',
       );
@@ -1690,6 +2146,7 @@ class Repo {
     String? mealContext,
     String? notes,
   }) async {
+    final measuredAt = _nowGmtPlus7Iso();
     try {
       final m =
           await _withTokenRefresh(() => RemoteApi(_cfg).createBloodSugarLog(
@@ -1697,6 +2154,7 @@ class Repo {
                 unit: unit,
                 mealContext: mealContext,
                 notes: notes,
+                measuredAt: measuredAt,
               ));
       final log = BloodSugarLog.fromMap(m);
       await AppDb.instance.putBloodSugarLog(log, _userId);
@@ -1706,7 +2164,7 @@ class Repo {
         id: _uuid.v4(),
         level: level,
         unit: unit,
-        measuredAt: _nowIso(),
+        measuredAt: measuredAt,
         mealContext: mealContext,
         notes: notes,
         syncState: 'pending',
@@ -1726,11 +2184,14 @@ class Repo {
     for (final item
         in await AppDb.instance.getPendingInsulinItems(cfg.userId)) {
       try {
+        // Every push carries the stamp the record was queued with, so a health
+        // record entered offline is not restamped with the time sync ran.
         final m = await remote.createInsulinItem(
           name: item.name,
           units: item.units,
           uom: item.uom,
           notes: item.notes,
+          createdAt: item.date,
         );
         final synced = InsulinItem.fromMap(m);
         itemIdMap[item.id] = synced.id;
@@ -1757,6 +2218,7 @@ class Repo {
           insulinItemId: itemId,
           batchNo: assign.batchNo,
           notes: assign.notes,
+          addedAt: assign.date,
         );
         final synced = InsulinAssign.fromMap(m);
         assignIdMap[assign.id] = synced.id;
@@ -1783,6 +2245,7 @@ class Repo {
           insulinAssignId: assignId,
           units: usage.units,
           notes: usage.notes,
+          administeredAt: usage.date,
         );
         final synced = InsulinUsage.fromMap(m);
         await AppDb.instance.deleteInsulinUsage(usage.id, cfg.userId);
@@ -1802,6 +2265,7 @@ class Repo {
           unit: log.unit,
           mealContext: log.mealContext,
           notes: log.notes,
+          measuredAt: log.measuredAt,
         );
         final synced = BloodSugarLog.fromMap(m);
         await AppDb.instance.deleteBloodSugarLog(log.id, cfg.userId);

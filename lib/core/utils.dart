@@ -41,6 +41,17 @@ String fmtDate(String s, String kind) {
   return s;
 }
 
+/// A quantity with no trailing zeros - "5", "2,5", "12,3456". Used for
+/// investment units, which are whole grams for metal but run to several
+/// decimals for reksa dana.
+String fmtUnits(double value) {
+  if (value == value.roundToDouble()) return value.round().toString();
+  return value
+      .toStringAsFixed(4)
+      .replaceFirst(RegExp(r'0+$'), '')
+      .replaceFirst(RegExp(r'\.$'), '');
+}
+
 String isoDay(String s) => s.length >= 10 ? s.substring(0, 10) : s;
 String isoMonth(String s) => s.length >= 7 ? s.substring(0, 7) : s;
 
@@ -145,7 +156,9 @@ List<({String name, double amount, Color color})> spendByCategory(List<Transacti
   return list;
 }
 
-List<double> netWorthSeries(List<Transaction> txns) {
+/// Running balance across all cash sources over time - the "liquid" line.
+/// Investments are tracked separately and are deliberately not part of this.
+List<double> liquidSeries(List<Transaction> txns) {
   final sorted = [...txns]..sort((a, b) => a.date.compareTo(b.date));
   final series = <double>[];
   double total = 0;

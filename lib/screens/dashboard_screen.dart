@@ -31,7 +31,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         final bal = computeBalances(data.transactions);
         final totalNet = data.sources.fold<double>(0, (s, src) => s + (bal[src.name] ?? 0));
         final totals = monthTotals(data.transactions, _ym);
-        final series = netWorthSeries(data.transactions);
+        final series = liquidSeries(data.transactions);
         final recent = data.transactions.take(5).toList();
 
         return ListView(
@@ -125,7 +125,7 @@ class _HeroCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Net worth', style: TextStyle(fontSize: 13, color: c.muted)),
+          Text('Liquid', style: TextStyle(fontSize: 13, color: c.muted)),
           const SizedBox(height: 4),
           Text(
             fmtRp(totalNet, currency),

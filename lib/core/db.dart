@@ -8,9 +8,12 @@ const _userScopedTables = [
   'sources',
   'categories',
   'transactions',
+  'transaction_details',
   'wishlist_items',
   'routine_transactions',
   'routine_payments',
+  'consumables',
+  'investments',
   'activity_categories',
   'activity_templates',
   'daily_activities',
@@ -42,7 +45,7 @@ class AppDb {
     _db = await factory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 14,
+        version: 18,
         onCreate: (db, _) async {
           await db.execute('''CREATE TABLE sources (
             id TEXT NOT NULL,
@@ -77,6 +80,9 @@ class AppDb {
             userId TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (id, userId)
           )''');
+          await _createTransactionDetailsTable(db);
+          await _createConsumablesTable(db);
+          await _createInvestmentsTable(db);
           await db.execute('''CREATE TABLE wishlist_items (
             id TEXT NOT NULL,
             itemName TEXT NOT NULL,
@@ -268,6 +274,19 @@ class AppDb {
           if (oldVersion < 14) {
             await _createPendingDeletesTable(db);
           }
+          if (oldVersion < 15) {
+            await _createTransactionDetailsTable(db);
+          }
+          if (oldVersion < 16) {
+            await _addColumnIfMissing(
+                db, 'transaction_details', 'checked INTEGER NOT NULL DEFAULT 1');
+          }
+          if (oldVersion < 17) {
+            await _createConsumablesTable(db);
+          }
+          if (oldVersion < 18) {
+            await _createInvestmentsTable(db);
+          }
         },
       ),
     );
@@ -338,10 +357,104 @@ class AppDb {
   Future<void> deleteTransaction(String id, String userId) async {
     await _db.delete('transactions',
         where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
+    await deleteTransactionDetailsFor(id, userId);
   }
 
   /// Transactions created while the API was unreachable ("local mode"),
   /// queued here until [Repo.syncPendingTransactions] can push them.
+  // ── Transaction details (line items) ───────────────────────────────
+  Future<List<TransactionDetail>> getTransactionDetails(String userId) async {
+    final rows = await _db.query('transaction_details',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'updatedAt ASC');
+    return rows.map(TransactionDetail.fromMap).toList();
+  }
+
+  Future<List<TransactionDetail>> getTransactionDetailsFor(
+      String transactionId, String userId) async {
+    final rows = await _db.query('transaction_details',
+        where: 'transactionId = ? AND userId = ?',
+        whereArgs: [transactionId, userId],
+        orderBy: 'updatedAt ASC');
+    return rows.map(TransactionDetail.fromMap).toList();
+  }
+
+  /// Rows the server does not know about yet, in either sense: queued with a
+  /// transaction that has not been pushed (`pending`), or a synced item whose
+  /// tick was changed while the API was unreachable (`checkDirty`). Both must
+  /// survive a refresh and win over the server's copy until they are pushed.
+  Future<List<TransactionDetail>> getPendingTransactionDetails(
+      String userId) async {
+    final rows = await _db.query('transaction_details',
+        where: "userId = ? AND syncState IN ('pending', 'checkDirty')",
+        whereArgs: [userId],
+        orderBy: 'updatedAt ASC');
+    return rows.map(TransactionDetail.fromMap).toList();
+  }
+
+  /// Ticks changed offline, waiting to be pushed to the server.
+  Future<List<TransactionDetail>> getDirtyTransactionDetails(
+      String userId) async {
+    final rows = await _db.query('transaction_details',
+        where: "userId = ? AND syncState = 'checkDirty'",
+        whereArgs: [userId],
+        orderBy: 'updatedAt ASC');
+    return rows.map(TransactionDetail.fromMap).toList();
+  }
+
+  Future<void> setTransactionDetailChecked(
+      String id, String userId, bool checked, String syncState) async {
+    await _db.update(
+      'transaction_details',
+      {'checked': checked ? 1 : 0, 'syncState': syncState},
+      where: 'id = ? AND userId = ?',
+      whereArgs: [id, userId],
+    );
+  }
+
+  Future<void> putTransactionDetails(
+      List<TransactionDetail> details, String userId) async {
+    if (details.isEmpty) return;
+    await _db.transaction((txn) async {
+      for (final d in details) {
+        await txn.insert(
+            'transaction_details', {...d.toMap(), 'userId': userId},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
+  /// Replaces the server-side snapshot while keeping details that are still
+  /// queued for upload (`pending`) or hold an offline tick (`checkDirty`).
+  Future<void> replaceTransactionDetails(
+      List<TransactionDetail> details, String userId) async {
+    final localIds = <String>{};
+    await _db.transaction((txn) async {
+      final kept = await txn.query('transaction_details',
+          columns: ['id'],
+          where: "userId = ? AND syncState IN ('pending', 'checkDirty')",
+          whereArgs: [userId]);
+      localIds.addAll(kept.map((row) => row['id'] as String));
+      await txn.delete('transaction_details',
+          where: "userId = ? AND syncState NOT IN ('pending', 'checkDirty')",
+          whereArgs: [userId]);
+      for (final d in details) {
+        // A row still carrying a local change must not be overwritten by the
+        // server's older copy of itself.
+        if (localIds.contains(d.id)) continue;
+        await txn.insert(
+            'transaction_details', {...d.toMap(), 'userId': userId},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
+  Future<void> deleteTransactionDetailsFor(
+      String transactionId, String userId) async {
+    await _db.delete('transaction_details',
+        where: 'transactionId = ? AND userId = ?',
+        whereArgs: [transactionId, userId]);
+  }
+
   Future<List<Transaction>> getPendingTransactions(String userId) async {
     final rows = await _db.query('transactions',
         where: "userId = ? AND syncState = 'pending'",
@@ -396,6 +509,56 @@ class AppDb {
 
   Future<void> deleteWishlistItem(String id, String userId) async {
     await _db.delete('wishlist_items',
+        where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
+  }
+
+  // ── Consumables ────────────────────────────────────────────────────
+  Future<List<Consumable>> getConsumables(String userId) async {
+    final rows = await _db.query('consumables',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'inDate DESC');
+    return rows.map(Consumable.fromMap).toList();
+  }
+
+  Future<List<Consumable>> getPendingConsumables(String userId) async {
+    final rows = await _db.query('consumables',
+        where: "userId = ? AND syncState = 'pending'",
+        whereArgs: [userId],
+        orderBy: 'updatedAt ASC');
+    return rows.map(Consumable.fromMap).toList();
+  }
+
+  Future<void> putConsumable(Consumable item, String userId) async {
+    await _db.insert('consumables', {...item.toMap(), 'userId': userId},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> deleteConsumable(String id, String userId) async {
+    await _db.delete('consumables',
+        where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
+  }
+
+  // ── Investments ────────────────────────────────────────────────────
+  Future<List<Investment>> getInvestments(String userId) async {
+    final rows = await _db.query('investments',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'acquiredDate DESC');
+    return rows.map(Investment.fromMap).toList();
+  }
+
+  Future<List<Investment>> getPendingInvestments(String userId) async {
+    final rows = await _db.query('investments',
+        where: "userId = ? AND syncState = 'pending'",
+        whereArgs: [userId],
+        orderBy: 'updatedAt ASC');
+    return rows.map(Investment.fromMap).toList();
+  }
+
+  Future<void> putInvestment(Investment item, String userId) async {
+    await _db.insert('investments', {...item.toMap(), 'userId': userId},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> deleteInvestment(String id, String userId) async {
+    await _db.delete('investments',
         where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
   }
 
@@ -703,6 +866,30 @@ class AppDb {
     });
   }
 
+  Future<void> replaceConsumables(
+      List<Consumable> items, String userId) async {
+    await _db.transaction((txn) async {
+      await txn.delete('consumables',
+          where: "userId = ? AND syncState != 'pending'", whereArgs: [userId]);
+      for (final item in items) {
+        await txn.insert('consumables', {...item.toMap(), 'userId': userId},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
+  Future<void> replaceInvestments(
+      List<Investment> items, String userId) async {
+    await _db.transaction((txn) async {
+      await txn.delete('investments',
+          where: "userId = ? AND syncState != 'pending'", whereArgs: [userId]);
+      for (final item in items) {
+        await txn.insert('investments', {...item.toMap(), 'userId': userId},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
   Future<void> replaceRoutineTransactions(
       List<RoutineTransaction> items, String userId) async {
     await _db.transaction((txn) async {
@@ -793,11 +980,14 @@ class AppDb {
       getPendingWishlistItems(userId),
       getPendingRoutineTransactions(userId),
       getPendingRoutinePayments(userId),
+      getPendingConsumables(userId),
+      getPendingInvestments(userId),
       getPendingDeletes(userId),
       getPendingInsulinItems(userId),
       getPendingInsulinAssigns(userId),
       getPendingInsulinUsages(userId),
       getPendingBloodSugarLogs(userId),
+      getDirtyTransactionDetails(userId),
     ]);
     return results.fold<int>(0, (sum, rows) => sum + rows.length);
   }
@@ -1001,6 +1191,76 @@ Future<void> _createActivityTables(Database db) async {
     userId TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (id, userId)
   )''');
+}
+
+/// Line items ("transaction detail") for spending transactions. Rows survive
+/// offline: a detail queued against a locally generated transaction id is
+/// re-pointed at the server id once the parent spending syncs.
+Future<void> _createTransactionDetailsTable(Database db) async {
+  await db.execute('''CREATE TABLE IF NOT EXISTS transaction_details (
+    id TEXT NOT NULL,
+    transactionId TEXT NOT NULL,
+    itemName TEXT NOT NULL,
+    quantity REAL NOT NULL DEFAULT 1,
+    unitPrice REAL NOT NULL DEFAULT 0,
+    amount REAL NOT NULL DEFAULT 0,
+    note TEXT DEFAULT '',
+    checked INTEGER NOT NULL DEFAULT 1,
+    syncState TEXT DEFAULT 'pending',
+    updatedAt TEXT NOT NULL,
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, userId)
+  )''');
+  await db.execute('''CREATE INDEX IF NOT EXISTS idx_transaction_details_txn
+    ON transaction_details (transactionId, userId)''');
+}
+
+/// Units of things that run out. One row per physical unit, so a three-pack is
+/// three rows sharing an `itemName` and `unitTotal`.
+Future<void> _createConsumablesTable(Database db) async {
+  await db.execute('''CREATE TABLE IF NOT EXISTS consumables (
+    id TEXT NOT NULL,
+    itemName TEXT NOT NULL,
+    notes TEXT DEFAULT '',
+    unitIndex INTEGER NOT NULL DEFAULT 1,
+    unitTotal INTEGER NOT NULL DEFAULT 1,
+    price REAL NOT NULL DEFAULT 0,
+    inDate TEXT NOT NULL,
+    outDate TEXT DEFAULT '',
+    transactionId TEXT DEFAULT '',
+    transactionDetailId TEXT DEFAULT '',
+    syncState TEXT DEFAULT 'synced',
+    updatedAt TEXT NOT NULL,
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, userId)
+  )''');
+  await db.execute('''CREATE INDEX IF NOT EXISTS idx_consumables_txn
+    ON consumables (transactionId, userId)''');
+}
+
+/// Investment holdings - reksa dana positions and quantities of gold/silver.
+/// `lastUnitPrice` is cached here rather than fetched on read so the page still
+/// shows a value with no network, and `priceUpdatedAt` says how stale it is.
+Future<void> _createInvestmentsTable(Database db) async {
+  await db.execute('''CREATE TABLE IF NOT EXISTS investments (
+    id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    provider TEXT DEFAULT '',
+    units REAL NOT NULL DEFAULT 0,
+    buyUnitPrice REAL NOT NULL DEFAULT 0,
+    lastUnitPrice REAL NOT NULL DEFAULT 0,
+    priceSource TEXT DEFAULT '',
+    priceUpdatedAt TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    acquiredDate TEXT NOT NULL,
+    syncState TEXT DEFAULT 'synced',
+    updatedAt TEXT NOT NULL,
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, userId)
+  )''');
+  await db.execute('''CREATE INDEX IF NOT EXISTS idx_investments_kind
+    ON investments (kind, userId)''');
 }
 
 Future<void> _createPendingDeletesTable(Database db) async {

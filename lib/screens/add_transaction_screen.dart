@@ -2,17 +2,46 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:uuid/uuid.dart';
 import '../core/models.dart';
+import '../core/receipt_scanner.dart';
 import '../core/repo.dart';
 import '../core/remote_api.dart';
 import '../core/utils.dart';
 import '../theme/app_theme.dart';
 import '../providers/providers.dart';
 
+/// Pre-filled content for [AddTransactionScreen], passed as go_router `extra`.
+///
+/// The receipt scanner produces one of these after the user confirms the
+/// recognised price list; the Add-transaction screen then behaves like a normal
+/// manual entry with the item breakdown already filled in.
+class AddTransactionDraft {
+  final List<TransactionDetail> details;
+  final String description;
+  final double? amount;
+
+  const AddTransactionDraft({
+    this.details = const [],
+    this.description = '',
+    this.amount,
+  });
+}
+
 class AddTransactionScreen extends ConsumerStatefulWidget {
   final String? editId;
   final String? returnPath;
-  const AddTransactionScreen({super.key, this.editId, this.returnPath});
+
+  /// Optional pre-filled amount, description and line items (e.g. from a
+  /// scanned receipt).
+  final AddTransactionDraft? draft;
+
+  const AddTransactionScreen({
+    super.key,
+    this.editId,
+    this.returnPath,
+    this.draft,
+  });
 
   @override
   ConsumerState<AddTransactionScreen> createState() =>
@@ -23,6 +52,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   final _formKey = GlobalKey<FormState>();
   final _amtCtl = TextEditingController();
   final _descCtl = TextEditingController();
+  final _uuid = const Uuid();
 
   String _type = 'spending';
   String _source = '';
@@ -31,11 +61,82 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   String _category = '';
   bool _saving = false;
 
+  /// Line items saved alongside the spending as its "transaction detail".
+  final List<TransactionDetail> _details = [];
+
+  @override
+  void initState() {
+    super.initState();
+    final draft = widget.draft;
+    if (draft == null) return;
+
+    // A draft always describes a spending - only spendings carry line items.
+    _type = 'spending';
+    _details.addAll(draft.details);
+    if (draft.description.isNotEmpty) _descCtl.text = draft.description;
+    final amount = draft.amount ?? _detailsTotal;
+    if (amount > 0) _amtCtl.text = _formatAmount(amount);
+  }
+
   @override
   void dispose() {
     _amtCtl.dispose();
     _descCtl.dispose();
     super.dispose();
+  }
+
+  /// Only ticked items count: an unticked row stays in the breakdown as a
+  /// record of what was on the receipt but was not bought.
+  double get _detailsTotal =>
+      _details.fold<double>(0, (sum, d) => sum + d.checkedTotal);
+
+  static String _formatAmount(double value) => value == value.roundToDouble()
+      ? value.round().toString()
+      : value.toStringAsFixed(2);
+
+  /// Keeps the amount field in step with the breakdown whenever items change,
+  /// so the header total can never silently disagree with its detail.
+  void _syncAmountFromDetails() {
+    if (_details.isEmpty) return;
+    _amtCtl.text = _formatAmount(_detailsTotal);
+  }
+
+  Future<void> _editDetail({TransactionDetail? existing}) async {
+    final result = await showModalBottomSheet<TransactionDetail>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _DetailEditorSheet(
+        detail: existing,
+        newId: () => _uuid.v4(),
+      ),
+    );
+    if (result == null) return;
+    setState(() {
+      final index = _details.indexWhere((d) => d.id == result.id);
+      if (index >= 0) {
+        _details[index] = result;
+      } else {
+        _details.add(result);
+      }
+      _syncAmountFromDetails();
+    });
+  }
+
+  void _removeDetail(TransactionDetail detail) {
+    setState(() {
+      _details.removeWhere((d) => d.id == detail.id);
+      _syncAmountFromDetails();
+    });
+  }
+
+  void _toggleDetail(TransactionDetail detail, bool checked) {
+    setState(() {
+      final index = _details.indexWhere((d) => d.id == detail.id);
+      if (index < 0) return;
+      _details[index] = _details[index].copyWith(checked: checked);
+      _syncAmountFromDetails();
+    });
   }
 
   Future<void> _save(AppData data) async {
@@ -74,6 +175,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             description: description,
             category: category,
             source: source,
+            details: _details,
           );
           break;
         case 'transfer':
@@ -171,7 +273,15 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
                                 color: c.ink),
                           ),
                         ),
-                        const SizedBox(width: 40),
+                        if (_type == 'spending' && ReceiptScanner.isSupported)
+                          _IconBtn(
+                            icon: Icons.document_scanner_outlined,
+                            tooltip: 'Scan price list',
+                            onTap: () => context.push('/scan-receipt'),
+                            c: c,
+                          )
+                        else
+                          const SizedBox(width: 40),
                       ],
                     ),
                   ),
@@ -330,6 +440,20 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
                           c: c,
                           onChanged: (v) => setState(() => _category = v ?? ''),
                         )),
+                    const SizedBox(height: 14),
+                    if (_type == 'spending')
+                      _DetailSection(
+                        details: _details,
+                        currency: ref.watch(configProvider).currency,
+                        c: c,
+                        onAdd: () => _editDetail(),
+                        onEdit: (detail) => _editDetail(existing: detail),
+                        onRemove: _removeDetail,
+                        onToggle: _toggleDetail,
+                        onScan: ReceiptScanner.isSupported
+                            ? () => context.push('/scan-receipt')
+                            : null,
+                      ),
                   ],
                   const SizedBox(height: 24),
 
@@ -384,6 +508,12 @@ class _ReadOnlyTransactionView extends ConsumerWidget {
     final isTransfer = t.type == 'transfer';
     final amountColor = isTransfer ? c.transfer : (isEarning ? c.pos : c.neg);
     final sign = isTransfer ? '' : (isEarning ? '+' : '−');
+    // Line items live on AppData, so a synced spending shows its breakdown
+    // without an extra round-trip.
+    final details = ref.watch(appDataProvider).maybeWhen<List<TransactionDetail>>(
+          data: (data) => data.detailsFor(t.id),
+          orElse: () => const <TransactionDetail>[],
+        );
 
     return Scaffold(
       backgroundColor: c.bg,
@@ -457,6 +587,21 @@ class _ReadOnlyTransactionView extends ConsumerWidget {
                 ],
               ),
             ),
+            if (details.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              _ReadOnlyDetailList(
+                details: details,
+                currency: cfg.currency,
+                c: c,
+                onToggle: (detail, checked) async {
+                  await Repo.instance
+                      .setTransactionDetailChecked(detail, checked);
+                  await ref.read(appDataProvider.notifier).refreshCached();
+                },
+                onTrackAsConsumable: (detail) =>
+                    _trackAsConsumable(context, ref, t, detail),
+              ),
+            ],
             const SizedBox(height: 16),
             Container(
               padding: const EdgeInsets.all(14),
@@ -471,7 +616,9 @@ class _ReadOnlyTransactionView extends ConsumerWidget {
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      'This transaction is synced from the server and cannot be edited or deleted here.',
+                      details.isEmpty
+                          ? 'This transaction is synced from the server and cannot be edited or deleted here.'
+                          : 'This transaction is synced from the server and cannot be edited or deleted here. Ticking items off its detail is saved.',
                       style:
                           TextStyle(fontSize: 13, color: c.muted, height: 1.4),
                     ),
@@ -484,6 +631,238 @@ class _ReadOnlyTransactionView extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// Turns one line item into consumable units - one per unit bought, so a
+/// three-pack becomes three entries that run out on their own dates.
+///
+/// The unit price and the transaction's date carry over, and the link back to
+/// the purchase is kept, so the Consumables page can say where it came from.
+Future<void> _trackAsConsumable(
+  BuildContext context,
+  WidgetRef ref,
+  Transaction transaction,
+  TransactionDetail detail,
+) async {
+  final quantity = detail.quantity;
+  final count = quantity >= 1 && quantity == quantity.roundToDouble()
+      ? quantity.round()
+      : 1;
+  final unitPrice = detail.unitPrice > 0
+      ? detail.unitPrice
+      : (count > 0 ? detail.lineTotal / count : detail.lineTotal);
+
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Add to consumables?'),
+      content: Text(count > 1
+          ? '${detail.itemName} will be tracked as $count separate units, each '
+              'with its own in and out date.'
+          : '${detail.itemName} will be tracked as one unit you can mark as '
+              'used up later.'),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel')),
+        TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Add')),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+
+  await Repo.instance.addConsumables(
+    itemName: detail.itemName.isEmpty ? 'Item' : detail.itemName,
+    count: count,
+    price: unitPrice,
+    inDate: transaction.date,
+    transactionId: detail.transactionId,
+    transactionDetailId: detail.id,
+  );
+  await ref.read(appDataProvider.notifier).refreshCached();
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(count > 1
+          ? 'Added $count units to Consumables.'
+          : 'Added to Consumables.'),
+    ),
+  );
+}
+
+/// The breakdown of a saved transaction, shown as a checklist.
+///
+/// The spending itself cannot be edited after it is stored, but each line item
+/// keeps a tick recording whether it was actually bought - so the totals below
+/// separate what was on the receipt from what is still ticked.
+class _ReadOnlyDetailList extends StatelessWidget {
+  final List<TransactionDetail> details;
+  final String currency;
+  final AppColors c;
+  final Future<void> Function(TransactionDetail detail, bool checked) onToggle;
+  final void Function(TransactionDetail detail) onTrackAsConsumable;
+
+  const _ReadOnlyDetailList({
+    required this.details,
+    required this.currency,
+    required this.c,
+    required this.onToggle,
+    required this.onTrackAsConsumable,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final total = details.fold<double>(0, (sum, d) => sum + d.lineTotal);
+    final checkedTotal =
+        details.fold<double>(0, (sum, d) => sum + d.checkedTotal);
+    final unchecked = details.where((d) => !d.checked).length;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: c.line2, width: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Detail (${details.length} item${details.length == 1 ? '' : 's'})',
+            style: TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w600, color: c.muted),
+          ),
+          const SizedBox(height: 10),
+          ...details.map((d) => Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  children: [
+                    Checkbox(
+                      value: d.checked,
+                      activeColor: c.accent,
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize:
+                          MaterialTapTargetSize.shrinkWrap,
+                      onChanged: (v) => onToggle(d, v ?? false),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            d.itemName.isEmpty ? 'Item' : d.itemName,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                              color: d.checked ? c.ink : c.muted,
+                              decoration: d.checked
+                                  ? null
+                                  : TextDecoration.lineThrough,
+                            ),
+                          ),
+                          if (d.quantity != 1 || d.note.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text(
+                                [
+                                  if (d.quantity != 1)
+                                    '${_qty(d.quantity)} × ${fmtRp(d.unitPrice, currency)}',
+                                  if (d.note.isNotEmpty) d.note,
+                                ].join(' · '),
+                                style:
+                                    TextStyle(fontSize: 11, color: c.muted),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Text(
+                      fmtRp(d.lineTotal, currency),
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: d.checked ? c.ink : c.muted,
+                        decoration:
+                            d.checked ? null : TextDecoration.lineThrough,
+                      ),
+                    ),
+                    PopupMenuButton<String>(
+                      tooltip: 'Item actions',
+                      padding: EdgeInsets.zero,
+                      color: c.surface,
+                      icon: Icon(Icons.more_vert_rounded,
+                          size: 18, color: c.muted),
+                      onSelected: (value) {
+                        if (value == 'consumable') onTrackAsConsumable(d);
+                      },
+                      itemBuilder: (_) => [
+                        PopupMenuItem<String>(
+                          value: 'consumable',
+                          child: Row(
+                            children: [
+                              Icon(Icons.inventory_2_outlined,
+                                  size: 18, color: c.ink),
+                              const SizedBox(width: 10),
+                              Text('Add to consumables',
+                                  style: TextStyle(color: c.ink)),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              )),
+          const SizedBox(height: 6),
+          Divider(color: c.line2, height: 1),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text('Items total',
+                      style: TextStyle(fontSize: 13, color: c.muted)),
+                ),
+                Text(
+                  fmtRp(total, currency),
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: c.ink),
+                ),
+              ],
+            ),
+          ),
+          // Only worth showing once something has been unticked - otherwise it
+          // just repeats the line above.
+          if (unchecked > 0)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text('Ticked ($unchecked left out)',
+                        style: TextStyle(fontSize: 13, color: c.muted)),
+                  ),
+                  Text(
+                    fmtRp(checkedTotal, currency),
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: c.muted),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  static String _qty(double qty) =>
+      qty == qty.roundToDouble() ? qty.round().toString() : qty.toString();
 }
 
 class _DetailRow extends StatelessWidget {
@@ -627,11 +1006,17 @@ class _IconBtn extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
   final AppColors c;
-  const _IconBtn({required this.icon, required this.onTap, required this.c});
+  final String? tooltip;
+  const _IconBtn({
+    required this.icon,
+    required this.onTap,
+    required this.c,
+    this.tooltip,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    final button = GestureDetector(
       onTap: onTap,
       child: Container(
         width: 40,
@@ -639,6 +1024,366 @@ class _IconBtn extends StatelessWidget {
         decoration: BoxDecoration(
             color: c.surface, borderRadius: BorderRadius.circular(12)),
         child: Icon(icon, size: 20, color: c.ink),
+      ),
+    );
+    return tooltip == null ? button : Tooltip(message: tooltip!, child: button);
+  }
+}
+
+/// Editable list of line items shown under a spending. Populated by hand or
+/// from a scanned price list; each row maps to one `spending_detail` row.
+class _DetailSection extends StatelessWidget {
+  final List<TransactionDetail> details;
+  final String currency;
+  final AppColors c;
+  final VoidCallback onAdd;
+  final void Function(TransactionDetail detail) onEdit;
+  final void Function(TransactionDetail detail) onRemove;
+  final void Function(TransactionDetail detail, bool checked) onToggle;
+  final VoidCallback? onScan;
+
+  const _DetailSection({
+    required this.details,
+    required this.currency,
+    required this.c,
+    required this.onAdd,
+    required this.onEdit,
+    required this.onRemove,
+    required this.onToggle,
+    this.onScan,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final total = details.fold<double>(0, (sum, d) => sum + d.checkedTotal);
+    final unchecked = details.where((d) => !d.checked).length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Transaction detail',
+                style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w500, color: c.muted),
+              ),
+            ),
+            if (onScan != null)
+              TextButton.icon(
+                onPressed: onScan,
+                style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: Size.zero),
+                icon: Icon(Icons.document_scanner_outlined,
+                    size: 16, color: c.accent),
+                label: Text('Scan',
+                    style: TextStyle(color: c.accent, fontSize: 13)),
+              ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Container(
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: c.line2, width: 0.5),
+          ),
+          clipBehavior: Clip.hardEdge,
+          child: Column(
+            children: [
+              if (details.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Text(
+                    'No breakdown yet. Add items one by one, or scan a printed '
+                    'price list to fill them in. Untick an item to leave it out '
+                    'of the amount.',
+                    style:
+                        TextStyle(color: c.muted, fontSize: 13, height: 1.4),
+                  ),
+                )
+              else
+                ...details.map((d) => InkWell(
+                      onTap: () => onEdit(d),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(4, 11, 8, 11),
+                        child: Row(
+                          children: [
+                            Checkbox(
+                              value: d.checked,
+                              activeColor: c.accent,
+                              visualDensity: VisualDensity.compact,
+                              onChanged: (v) => onToggle(d, v ?? false),
+                            ),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    d.itemName.isEmpty ? 'Item' : d.itemName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w500,
+                                      color: d.checked ? c.ink : c.muted,
+                                      decoration: d.checked
+                                          ? null
+                                          : TextDecoration.lineThrough,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    [
+                                      '${_qtyLabel(d.quantity)} × ${fmtRp(d.unitPrice, currency)}',
+                                      if (d.note.isNotEmpty) d.note,
+                                    ].join(' · '),
+                                    style: TextStyle(
+                                        fontSize: 11, color: c.muted),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Text(
+                              fmtRp(d.lineTotal, currency),
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color: d.checked ? c.ink : c.muted,
+                                decoration: d.checked
+                                    ? null
+                                    : TextDecoration.lineThrough,
+                              ),
+                            ),
+                            GestureDetector(
+                              onTap: () => onRemove(d),
+                              child: Padding(
+                                padding: const EdgeInsets.all(8),
+                                child: Icon(Icons.close_rounded,
+                                    size: 16, color: c.muted),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )),
+              Divider(color: c.line2, height: 1),
+              InkWell(
+                onTap: onAdd,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.add_rounded, size: 18, color: c.accent),
+                      const SizedBox(width: 6),
+                      Text('Add item',
+                          style: TextStyle(color: c.accent, fontSize: 13)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (details.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 2, top: 6),
+            child: Text(
+              '${details.length - unchecked} of ${details.length} ticked · '
+              '${fmtRp(total, currency)} — the amount above follows this total.',
+              style: TextStyle(color: c.muted, fontSize: 11),
+            ),
+          ),
+      ],
+    );
+  }
+
+  static String _qtyLabel(double qty) =>
+      qty == qty.roundToDouble() ? qty.round().toString() : qty.toString();
+}
+
+/// Bottom sheet for creating or editing a single line item.
+class _DetailEditorSheet extends StatefulWidget {
+  final TransactionDetail? detail;
+  final String Function() newId;
+
+  const _DetailEditorSheet({required this.detail, required this.newId});
+
+  @override
+  State<_DetailEditorSheet> createState() => _DetailEditorSheetState();
+}
+
+class _DetailEditorSheetState extends State<_DetailEditorSheet> {
+  late final TextEditingController _nameCtl;
+  late final TextEditingController _qtyCtl;
+  late final TextEditingController _priceCtl;
+  late final TextEditingController _noteCtl;
+
+  @override
+  void initState() {
+    super.initState();
+    final d = widget.detail;
+    _nameCtl = TextEditingController(text: d?.itemName ?? '');
+    _qtyCtl = TextEditingController(text: _fmt(d?.quantity ?? 1));
+    _priceCtl =
+        TextEditingController(text: d == null ? '' : _fmt(d.unitPrice));
+    _noteCtl = TextEditingController(text: d?.note ?? '');
+  }
+
+  @override
+  void dispose() {
+    _nameCtl.dispose();
+    _qtyCtl.dispose();
+    _priceCtl.dispose();
+    _noteCtl.dispose();
+    super.dispose();
+  }
+
+  static String _fmt(double value) => value == value.roundToDouble()
+      ? value.round().toString()
+      : value.toStringAsFixed(2);
+
+  void _submit() {
+    final name = _nameCtl.text.trim();
+    final quantity =
+        double.tryParse(_qtyCtl.text.replaceAll(',', '.')) ?? 1;
+    final unitPrice =
+        double.tryParse(_priceCtl.text.replaceAll(',', '.')) ?? 0;
+    if (name.isEmpty || unitPrice <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Item name and a price are required.')),
+      );
+      return;
+    }
+    final qty = quantity <= 0 ? 1.0 : quantity;
+    final existing = widget.detail;
+    Navigator.pop(
+      context,
+      TransactionDetail(
+        id: existing?.id ?? widget.newId(),
+        transactionId: existing?.transactionId ?? '',
+        itemName: name,
+        quantity: qty,
+        unitPrice: unitPrice,
+        amount: qty * unitPrice,
+        note: _noteCtl.text.trim(),
+        syncState: 'pending',
+        updatedAt: DateTime.now().toIso8601String(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppTheme.colorsOf(context);
+    return Padding(
+      padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Container(
+        decoration: BoxDecoration(
+          color: c.bg,
+          borderRadius:
+              const BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              widget.detail == null ? 'Add item' : 'Edit item',
+              style: TextStyle(
+                  fontSize: 17, fontWeight: FontWeight.w700, color: c.ink),
+            ),
+            const SizedBox(height: 14),
+            _SheetField(
+                label: 'Item name', controller: _nameCtl, c: c, autofocus: true),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                SizedBox(
+                  width: 90,
+                  child: _SheetField(
+                      label: 'Qty', controller: _qtyCtl, c: c, numeric: true),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _SheetField(
+                      label: 'Unit price',
+                      controller: _priceCtl,
+                      c: c,
+                      numeric: true),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            _SheetField(label: 'Note (optional)', controller: _noteCtl, c: c),
+            const SizedBox(height: 18),
+            SizedBox(
+              height: 48,
+              child: ElevatedButton(
+                onPressed: _submit,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: c.ink,
+                  foregroundColor: c.bg,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14)),
+                ),
+                child: const Text('Save item',
+                    style: TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SheetField extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+  final AppColors c;
+  final bool numeric;
+  final bool autofocus;
+
+  const _SheetField({
+    required this.label,
+    required this.controller,
+    required this.c,
+    this.numeric = false,
+    this.autofocus = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: controller,
+      autofocus: autofocus,
+      keyboardType: numeric
+          ? const TextInputType.numberWithOptions(decimal: true)
+          : TextInputType.text,
+      inputFormatters: numeric
+          ? [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))]
+          : null,
+      style: TextStyle(fontSize: 15, color: c.ink),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: TextStyle(color: c.muted, fontSize: 13),
+        filled: true,
+        fillColor: c.surface,
+        border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: c.line, width: 0.5)),
+        enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: c.line, width: 0.5)),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       ),
     );
   }

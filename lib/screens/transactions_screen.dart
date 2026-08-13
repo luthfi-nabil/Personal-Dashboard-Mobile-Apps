@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
 import '../core/models.dart';
+import '../core/receipt_scanner.dart';
 import '../core/repo.dart';
 import '../core/remote_api.dart';
 import '../core/utils.dart';
@@ -113,46 +116,14 @@ class _TransactionsScreenState extends ConsumerState<TransactionsScreen> {
                 child: Column(
                   children: [
                     // Search
-                    Container(
-                      height: 42,
-                      decoration: BoxDecoration(
-                        color: c.surface,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: c.line2, width: 0.5),
-                      ),
-                      child: Row(
-                        children: [
-                          const SizedBox(width: 12),
-                          Icon(Icons.search, size: 18, color: c.muted),
+                    Row(
+                      children: [
+                        Expanded(child: _searchField(c)),
+                        if (ReceiptScanner.isSupported) ...[
                           const SizedBox(width: 8),
-                          Expanded(
-                            child: TextField(
-                              controller: _searchCtl,
-                              style: TextStyle(fontSize: 14, color: c.ink),
-                              decoration: InputDecoration(
-                                hintText: 'Search description…',
-                                hintStyle:
-                                    TextStyle(color: c.muted, fontSize: 14),
-                                border: InputBorder.none,
-                                contentPadding: EdgeInsets.zero,
-                              ),
-                              onChanged: (v) => setState(() => _q = v),
-                            ),
-                          ),
-                          if (_q.isNotEmpty)
-                            GestureDetector(
-                              onTap: () {
-                                _searchCtl.clear();
-                                setState(() => _q = '');
-                              },
-                              child: Padding(
-                                padding: const EdgeInsets.all(8),
-                                child:
-                                    Icon(Icons.close, size: 16, color: c.muted),
-                              ),
-                            ),
+                          _ScanEntryButton(c: c),
                         ],
-                      ),
+                      ],
                     ),
                     const SizedBox(height: 8),
                     // Filters row
@@ -254,6 +225,8 @@ class _TransactionsScreenState extends ConsumerState<TransactionsScreen> {
                                       .map((t) => TxnTile(
                                             t: t,
                                             currency: cfg.currency,
+                                            onTap: () =>
+                                                context.push('/add/${t.id}'),
                                             onDelete: () async {
                                               if (await _confirmDelete(t)) {
                                                 await _deleteTransaction(t);
@@ -277,12 +250,81 @@ class _TransactionsScreenState extends ConsumerState<TransactionsScreen> {
     );
   }
 
+  Widget _searchField(AppColors c) => Container(
+        height: 42,
+        decoration: BoxDecoration(
+          color: c.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: c.line2, width: 0.5),
+        ),
+        child: Row(
+          children: [
+            const SizedBox(width: 12),
+            Icon(Icons.search, size: 18, color: c.muted),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _searchCtl,
+                style: TextStyle(fontSize: 14, color: c.ink),
+                decoration: InputDecoration(
+                  hintText: 'Search description…',
+                  hintStyle: TextStyle(color: c.muted, fontSize: 14),
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.zero,
+                ),
+                onChanged: (v) => setState(() => _q = v),
+              ),
+            ),
+            if (_q.isNotEmpty)
+              GestureDetector(
+                onTap: () {
+                  _searchCtl.clear();
+                  setState(() => _q = '');
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Icon(Icons.close, size: 16, color: c.muted),
+                ),
+              ),
+          ],
+        ),
+      );
+
   String _typeFilterLabel(String v) => switch (v) {
         'earning' => 'Earnings',
         'spending' => 'Spending',
         'transfer' => 'Transfers',
         _ => 'All types',
       };
+}
+
+/// Entry point to the receipt scanner from the transaction list.
+class _ScanEntryButton extends StatelessWidget {
+  final AppColors c;
+  const _ScanEntryButton({required this.c});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Scan price list',
+      child: GestureDetector(
+        onTap: () => context.push(
+          Uri(path: '/scan-receipt', queryParameters: {'returnTo': '/transactions'})
+              .toString(),
+        ),
+        child: Container(
+          width: 42,
+          height: 42,
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: c.line2, width: 0.5),
+          ),
+          child: Icon(Icons.document_scanner_outlined, size: 19, color: c.ink),
+        ),
+      ),
+    );
+  }
 }
 
 class _FilterChip extends StatelessWidget {

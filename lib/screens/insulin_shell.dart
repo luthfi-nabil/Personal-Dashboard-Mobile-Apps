@@ -10,6 +10,7 @@ import '../core/utils.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
 import '../widgets/app_menu_drawer.dart';
+import 'main_shell.dart' show refreshNow;
 
 enum InsulinPageView { home, activity, reports }
 
@@ -31,10 +32,10 @@ class InsulinPage extends ConsumerWidget {
       drawer: AppMenuDrawer(currentPath: location),
       body: Column(
         children: [
-          _InsulinTopBar(c: c),
+          _InsulinTopBar(c: c, onRefresh: () => refreshNow(context, ref)),
           Expanded(
             child: RefreshIndicator(
-              onRefresh: () => ref.read(appDataProvider.notifier).refresh(),
+              onRefresh: () => refreshNow(context, ref),
               child: dataAsync.when(
                 loading: () => _StatusList(
                   c: c,
@@ -143,7 +144,11 @@ class _AddMenuTile extends StatelessWidget {
 class _InsulinTopBar extends StatelessWidget {
   final AppColors c;
 
-  const _InsulinTopBar({required this.c});
+  /// Same manual refresh as the main shell, so the control is where the user
+  /// expects it here too rather than only as a pull-down.
+  final VoidCallback onRefresh;
+
+  const _InsulinTopBar({required this.c, required this.onRefresh});
 
   @override
   Widget build(BuildContext context) {
@@ -186,6 +191,11 @@ class _InsulinTopBar extends StatelessWidget {
                 color: c.ink,
               ),
             ),
+          ),
+          IconButton(
+            tooltip: 'Refresh data',
+            onPressed: onRefresh,
+            icon: Icon(Icons.refresh_rounded, color: c.ink),
           ),
         ],
       ),
@@ -243,7 +253,7 @@ class _InsulinAddPageState extends ConsumerState<InsulinAddPage> {
       drawer: AppMenuDrawer(currentPath: location),
       body: Column(
         children: [
-          _InsulinTopBar(c: c),
+          _InsulinTopBar(c: c, onRefresh: () => refreshNow(context, ref)),
           Expanded(
             child: dataAsync.when(
               loading: () => _StatusList(
