@@ -8,14 +8,14 @@ import '../core/utils.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
 
-class WishlistScreen extends ConsumerStatefulWidget {
-  const WishlistScreen({super.key});
+class PlannedExpenseScreen extends ConsumerStatefulWidget {
+  const PlannedExpenseScreen({super.key});
 
   @override
-  ConsumerState<WishlistScreen> createState() => _WishlistScreenState();
+  ConsumerState<PlannedExpenseScreen> createState() => _PlannedExpenseScreenState();
 }
 
-class _WishlistScreenState extends ConsumerState<WishlistScreen> {
+class _PlannedExpenseScreenState extends ConsumerState<PlannedExpenseScreen> {
   int _tab = 0;
 
   @override
@@ -46,7 +46,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
           ),
           if (_tab == 0)
             TextButton.icon(
-              onPressed: () => _openWishlistEditor(context),
+              onPressed: () => _openPlannedExpenseEditor(context),
               icon: const Icon(Icons.add_rounded, size: 18),
               label: const Text('Add'),
             ),
@@ -67,10 +67,10 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
   Widget _buildListView(
       BuildContext context, AppData data, AppConfig cfg, AppColors c) {
     final active =
-        data.wishlistItems.where((item) => item.status == 'active').toList();
+        data.plannedExpenseItems.where((item) => item.status == 'active').toList();
     final history =
-        data.wishlistItems.where((item) => item.status != 'active').toList();
-    final fulfilled = data.wishlistItems
+        data.plannedExpenseItems.where((item) => item.status != 'active').toList();
+    final fulfilled = data.plannedExpenseItems
         .where((item) => item.status == 'fulfilled')
         .toList()
       ..sort((a, b) => (b.fulfilledAt ?? '').compareTo(a.fulfilledAt ?? ''));
@@ -94,7 +94,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
       children: [
         ..._pageHeader(context, data, cfg, c),
-        _WishlistReports(
+        _PlannedExpenseReports(
           plannedTotal: plannedTotal,
           plannedSpendingTotal: plannedSpendingTotal,
           plannedEarningTotal: plannedEarningTotal,
@@ -114,7 +114,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
         if (active.isEmpty)
           _EmptyPanel(c: c, text: 'No planned expenses yet.')
         else
-          ...active.map((item) => _WishlistCard(
+          ...active.map((item) => _PlannedExpenseCard(
                 item: item,
                 currency: cfg.currency,
                 c: c,
@@ -134,7 +134,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
         if (history.isEmpty)
           _EmptyPanel(c: c, text: 'Fulfilled and canceled plans appear here.')
         else
-          ...history.map((item) => _WishlistCard(
+          ...history.map((item) => _PlannedExpenseCard(
                 item: item,
                 currency: cfg.currency,
                 c: c,
@@ -152,7 +152,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
     final plannedCats =
         data.categories.where((cat) => cat.kind == 'planned_expense').toList();
     final active =
-        data.wishlistItems.where((item) => item.status == 'active').toList();
+        data.plannedExpenseItems.where((item) => item.status == 'active').toList();
 
     final catTotals = <String,
         ({double total, double spending, double earning, int count})>{};
@@ -290,12 +290,12 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
     );
   }
 
-  Future<void> _cancel(BuildContext context, WishlistItem item) async {
-    await Repo.instance.cancelWishlistItem(item);
+  Future<void> _cancel(BuildContext context, PlannedExpenseItem item) async {
+    await Repo.instance.cancelPlannedExpenseItem(item);
     await ref.read(appDataProvider.notifier).refresh();
   }
 
-  Future<void> _remove(BuildContext context, WishlistItem item) async {
+  Future<void> _remove(BuildContext context, PlannedExpenseItem item) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -311,11 +311,11 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
       ),
     );
     if (confirmed != true) return;
-    await Repo.instance.removeWishlistItem(item);
+    await Repo.instance.removePlannedExpenseItem(item);
     await ref.read(appDataProvider.notifier).refresh();
   }
 
-  void _openWishlistEditor(BuildContext context) {
+  void _openPlannedExpenseEditor(BuildContext context) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -323,7 +323,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => _WishlistEditorSheet(onSaved: () async {
+      builder: (_) => _PlannedExpenseEditorSheet(onSaved: () async {
         await ref.read(appDataProvider.notifier).refresh();
       }),
     );
@@ -348,7 +348,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
 
   Future<void> _openFulfillDialog(
     BuildContext context,
-    WishlistItem item,
+    PlannedExpenseItem item,
     AppData data, {
     bool partialPayment = false,
   }) async {
@@ -455,13 +455,13 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
     final category =
         financeCategories.firstWhere((cat) => cat.id == categoryId);
     final savedLocally = partialPayment
-        ? await Repo.instance.partialPayWishlistItem(
+        ? await Repo.instance.partialPayPlannedExpenseItem(
             item: item,
             price: price,
             category: category,
             source: source,
           )
-        : await Repo.instance.fulfillWishlistItem(
+        : await Repo.instance.fulfillPlannedExpenseItem(
             item: item, price: price, category: category, source: source);
     await ref.read(appDataProvider.notifier).refresh();
     if (context.mounted && savedLocally) {
@@ -474,7 +474,7 @@ class _WishlistScreenState extends ConsumerState<WishlistScreen> {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-String _prioritySummary(List<WishlistItem> items) {
+String _prioritySummary(List<PlannedExpenseItem> items) {
   final counts = <String, int>{};
   for (final item in items) {
     counts[item.priority] = (counts[item.priority] ?? 0) + 1;
@@ -486,7 +486,7 @@ String _prioritySummary(List<WishlistItem> items) {
       .join(' / ');
 }
 
-String _categorySummary(List<WishlistItem> items, String currency) {
+String _categorySummary(List<PlannedExpenseItem> items, String currency) {
   final totals = <String, double>{};
   for (final item in items) {
     final type = item.transactionType == 'earning' ? 'earning' : 'spending';
@@ -667,7 +667,7 @@ class _CategoryValueCard extends StatelessWidget {
   }
 }
 
-class _WishlistReports extends StatelessWidget {
+class _PlannedExpenseReports extends StatelessWidget {
   final double plannedTotal;
   final double plannedSpendingTotal;
   final double plannedEarningTotal;
@@ -675,13 +675,13 @@ class _WishlistReports extends StatelessWidget {
   final int highPriority;
   final int activeCount;
   final double averageFulfilled;
-  final WishlistItem? latestBought;
+  final PlannedExpenseItem? latestBought;
   final String prioritySummary;
   final String categorySummary;
   final String currency;
   final AppColors c;
 
-  const _WishlistReports({
+  const _PlannedExpenseReports({
     required this.plannedTotal,
     required this.plannedSpendingTotal,
     required this.plannedEarningTotal,
@@ -781,8 +781,8 @@ class _WishlistReports extends StatelessWidget {
   }
 }
 
-class _WishlistCard extends StatelessWidget {
-  final WishlistItem item;
+class _PlannedExpenseCard extends StatelessWidget {
+  final PlannedExpenseItem item;
   final String currency;
   final AppColors c;
   final VoidCallback? onFulfill;
@@ -790,7 +790,7 @@ class _WishlistCard extends StatelessWidget {
   final VoidCallback? onCancel;
   final VoidCallback onRemove;
 
-  const _WishlistCard({
+  const _PlannedExpenseCard({
     required this.item,
     required this.currency,
     required this.c,
@@ -882,16 +882,16 @@ class _WishlistCard extends StatelessWidget {
   }
 }
 
-class _WishlistEditorSheet extends ConsumerStatefulWidget {
+class _PlannedExpenseEditorSheet extends ConsumerStatefulWidget {
   final Future<void> Function() onSaved;
-  const _WishlistEditorSheet({required this.onSaved});
+  const _PlannedExpenseEditorSheet({required this.onSaved});
 
   @override
-  ConsumerState<_WishlistEditorSheet> createState() =>
-      _WishlistEditorSheetState();
+  ConsumerState<_PlannedExpenseEditorSheet> createState() =>
+      _PlannedExpenseEditorSheetState();
 }
 
-class _WishlistEditorSheetState extends ConsumerState<_WishlistEditorSheet> {
+class _PlannedExpenseEditorSheetState extends ConsumerState<_PlannedExpenseEditorSheet> {
   final _nameCtl = TextEditingController();
   final _priceCtl = TextEditingController();
   final _notesCtl = TextEditingController();
@@ -923,7 +923,7 @@ class _WishlistEditorSheetState extends ConsumerState<_WishlistEditorSheet> {
       }
     }
     if (name.isEmpty || price <= 0 || category == null) return;
-    await Repo.instance.createWishlistItem(
+    await Repo.instance.createPlannedExpenseItem(
       itemName: name,
       price: price,
       transactionType: _transactionType,

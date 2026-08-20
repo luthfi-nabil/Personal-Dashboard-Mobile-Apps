@@ -29,6 +29,10 @@ dependencies:
   # hidden elsewhere (see ReceiptScanner.isSupported).
   image_picker: ^1.1.0
   google_mlkit_text_recognition: '>=0.13.0 <1.0.0'
+  flutter_local_notifications: ^18.0.1
+  timezone: ^0.10.1
+  flutter_timezone: ^5.1.0
+  workmanager: ^0.10.9
 
 dev_dependencies:
   flutter_test:

@@ -19,8 +19,7 @@ class AppMenuDrawer extends ConsumerWidget {
     final pendingCount = ref.watch(pendingSyncCountProvider);
     final title =
         username.trim().isEmpty ? 'Personal Dashboard' : username.trim();
-    final plannedSelected = currentPath.startsWith('/planned-expenses') ||
-        currentPath.startsWith('/wishlist');
+    final plannedSelected = currentPath.startsWith('/planned-expenses');
     final routineSelected = currentPath.startsWith('/routine-transactions');
     final investmentSelected = currentPath.startsWith('/investments');
     final financeSelected = currentPath == '/dashboard' ||

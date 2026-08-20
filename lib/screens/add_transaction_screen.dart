@@ -514,6 +514,12 @@ class _ReadOnlyTransactionView extends ConsumerWidget {
           data: (data) => data.detailsFor(t.id),
           orElse: () => const <TransactionDetail>[],
         );
+    final plannedTransactions = ref
+        .watch(appDataProvider)
+        .maybeWhen<List<PlannedTransaction>>(
+          data: (data) => data.plannedTransactions,
+          orElse: () => const <PlannedTransaction>[],
+        );
 
     return Scaffold(
       backgroundColor: c.bg,
@@ -600,6 +606,9 @@ class _ReadOnlyTransactionView extends ConsumerWidget {
                 },
                 onTrackAsConsumable: (detail) =>
                     _trackAsConsumable(context, ref, t, detail),
+                onAddToPlannedTransaction: (detail) =>
+                    _addToPlannedTransaction(
+                        context, ref, detail, plannedTransactions),
               ),
             ],
             const SizedBox(height: 16),
@@ -692,6 +701,38 @@ Future<void> _trackAsConsumable(
   );
 }
 
+/// Tags one line item into a planned transaction bundle - a new, named one or
+/// an existing one the user already has - so it shows up grouped with
+/// everything else bought for that plan.
+Future<void> _addToPlannedTransaction(
+  BuildContext context,
+  WidgetRef ref,
+  TransactionDetail detail,
+  List<PlannedTransaction> plannedTransactions,
+) async {
+  final result = await showModalBottomSheet<_PlannedTransactionChoice>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => _PlannedTransactionPickerSheet(
+      itemName: detail.itemName.isEmpty ? 'Item' : detail.itemName,
+      existing: plannedTransactions,
+    ),
+  );
+  if (result == null) return;
+
+  await Repo.instance.addTransactionDetailToPlannedTransaction(
+    detail: detail,
+    existingBundleId: result.existingId,
+    newBundleName: result.newName,
+  );
+  await ref.read(appDataProvider.notifier).refreshCached();
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(content: Text('Added to "${result.displayName}".')),
+  );
+}
+
 /// The breakdown of a saved transaction, shown as a checklist.
 ///
 /// The spending itself cannot be edited after it is stored, but each line item
@@ -703,6 +744,7 @@ class _ReadOnlyDetailList extends StatelessWidget {
   final AppColors c;
   final Future<void> Function(TransactionDetail detail, bool checked) onToggle;
   final void Function(TransactionDetail detail) onTrackAsConsumable;
+  final void Function(TransactionDetail detail) onAddToPlannedTransaction;
 
   const _ReadOnlyDetailList({
     required this.details,
@@ -710,6 +752,7 @@ class _ReadOnlyDetailList extends StatelessWidget {
     required this.c,
     required this.onToggle,
     required this.onTrackAsConsumable,
+    required this.onAddToPlannedTransaction,
   });
 
   @override
@@ -796,6 +839,7 @@ class _ReadOnlyDetailList extends StatelessWidget {
                           size: 18, color: c.muted),
                       onSelected: (value) {
                         if (value == 'consumable') onTrackAsConsumable(d);
+                        if (value == 'planned') onAddToPlannedTransaction(d);
                       },
                       itemBuilder: (_) => [
                         PopupMenuItem<String>(
@@ -806,6 +850,18 @@ class _ReadOnlyDetailList extends StatelessWidget {
                                   size: 18, color: c.ink),
                               const SizedBox(width: 10),
                               Text('Add to consumables',
+                                  style: TextStyle(color: c.ink)),
+                            ],
+                          ),
+                        ),
+                        PopupMenuItem<String>(
+                          value: 'planned',
+                          child: Row(
+                            children: [
+                              Icon(Icons.playlist_add_rounded,
+                                  size: 18, color: c.ink),
+                              const SizedBox(width: 10),
+                              Text('Add to planned transaction',
                                   style: TextStyle(color: c.ink)),
                             ],
                           ),
@@ -998,6 +1054,212 @@ class _CategoryDropdown extends StatelessWidget {
       validator: (v) => v == null || v.isEmpty ? 'Required' : null,
       dropdownColor: c.surface,
       style: TextStyle(color: c.ink, fontSize: 15),
+    );
+  }
+}
+
+/// What [_PlannedTransactionPickerSheet] hands back: either a brand new
+/// bundle name, or the id of one the user already has.
+class _PlannedTransactionChoice {
+  final String? existingId;
+  final String? newName;
+  final String displayName;
+  const _PlannedTransactionChoice({
+    this.existingId,
+    this.newName,
+    required this.displayName,
+  });
+}
+
+/// Bottom sheet for tagging a transaction line item into a planned
+/// transaction bundle - create a new named one, or pick one already made.
+class _PlannedTransactionPickerSheet extends StatefulWidget {
+  final String itemName;
+  final List<PlannedTransaction> existing;
+
+  const _PlannedTransactionPickerSheet({
+    required this.itemName,
+    required this.existing,
+  });
+
+  @override
+  State<_PlannedTransactionPickerSheet> createState() =>
+      _PlannedTransactionPickerSheetState();
+}
+
+class _PlannedTransactionPickerSheetState
+    extends State<_PlannedTransactionPickerSheet> {
+  late bool _isNew = widget.existing.isEmpty;
+  final _nameCtl = TextEditingController();
+  String? _selectedId;
+
+  @override
+  void dispose() {
+    _nameCtl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (_isNew) {
+      final name = _nameCtl.text.trim();
+      if (name.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Enter a name for the plan.')),
+        );
+        return;
+      }
+      Navigator.pop(
+        context,
+        _PlannedTransactionChoice(newName: name, displayName: name),
+      );
+      return;
+    }
+    final selected =
+        widget.existing.where((b) => b.id == _selectedId).firstOrNull;
+    if (selected == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Choose a plan.')),
+      );
+      return;
+    }
+    Navigator.pop(
+      context,
+      _PlannedTransactionChoice(
+          existingId: selected.id, displayName: selected.name),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppTheme.colorsOf(context);
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Container(
+        decoration: BoxDecoration(
+          color: c.bg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Add to planned transaction',
+                style: TextStyle(
+                    fontSize: 17, fontWeight: FontWeight.w700, color: c.ink)),
+            const SizedBox(height: 4),
+            Text(widget.itemName,
+                style: TextStyle(fontSize: 13, color: c.muted)),
+            const SizedBox(height: 14),
+            if (widget.existing.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: c.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: c.line2, width: 0.5),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                        child: _ChoiceTab(
+                            label: 'New plan',
+                            active: _isNew,
+                            c: c,
+                            onTap: () => setState(() => _isNew = true))),
+                    Expanded(
+                        child: _ChoiceTab(
+                            label: 'Existing plan',
+                            active: !_isNew,
+                            c: c,
+                            onTap: () => setState(() => _isNew = false))),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 14),
+            if (_isNew)
+              _SheetField(
+                  label: 'Plan name',
+                  controller: _nameCtl,
+                  c: c,
+                  autofocus: true)
+            else
+              DropdownButtonFormField<String>(
+                initialValue: _selectedId,
+                decoration: InputDecoration(
+                  labelText: 'Plan',
+                  labelStyle: TextStyle(color: c.muted, fontSize: 13),
+                  filled: true,
+                  fillColor: c.surface,
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: c.line, width: 0.5)),
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 12),
+                ),
+                dropdownColor: c.surface,
+                style: TextStyle(color: c.ink, fontSize: 15),
+                items: widget.existing
+                    .map((b) =>
+                        DropdownMenuItem(value: b.id, child: Text(b.name)))
+                    .toList(),
+                onChanged: (v) => setState(() => _selectedId = v),
+              ),
+            const SizedBox(height: 18),
+            SizedBox(
+              height: 48,
+              child: ElevatedButton(
+                onPressed: _submit,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: c.ink,
+                  foregroundColor: c.bg,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14)),
+                ),
+                child: const Text('Add',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ChoiceTab extends StatelessWidget {
+  final String label;
+  final bool active;
+  final AppColors c;
+  final VoidCallback onTap;
+
+  const _ChoiceTab({
+    required this.label,
+    required this.active,
+    required this.c,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: active ? c.surface2 : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              color: active ? c.ink : c.muted,
+            )),
+      ),
     );
   }
 }

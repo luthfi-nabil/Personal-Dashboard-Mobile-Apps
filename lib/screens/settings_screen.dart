@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../core/background_sync.dart';
 import '../core/config.dart';
 import '../core/db.dart';
+import '../core/notifications.dart';
 import '../core/features.dart';
+import '../core/models.dart';
 import '../core/seed.dart';
 import '../core/sync.dart';
 import '../theme/app_theme.dart';
@@ -63,7 +66,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _syncNow() async {
-    await ref.read(appDataProvider.notifier).refresh();
+    await ref.read(appDataProvider.notifier).refresh(force: true);
     if (!mounted) return;
     final failed = ref.read(appDataProvider).hasError ||
         ref.read(syncStatusProvider) == SyncStatus.error;
@@ -291,6 +294,107 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const SizedBox(height: 18),
 
+          // ── Reminders & background sync ────────────────────
+          if (NotificationService.isSupported) ...[
+            _SectionTitle('Reminders & background sync', c),
+            const SizedBox(height: 10),
+            _card(
+              c,
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _PrefToggle(
+                    label: 'Routine reminders',
+                    description:
+                        'Notify before a routine transaction falls due. Due '
+                        'dates come from each routine, using its last payment '
+                        'and its frequency.',
+                    enabled: cfg.remindersEnabled,
+                    c: c,
+                    onChanged: _setRemindersEnabled,
+                  ),
+                  if (cfg.remindersEnabled) ...[
+                    const Divider(height: 20),
+                    Row(
+                      children: [
+                        Expanded(
+                            child: Text('Notify at',
+                                style: TextStyle(color: c.ink, fontSize: 14))),
+                        TextButton(
+                          onPressed: () => _pickReminderTime(cfg),
+                          child: Text(_formatTime(cfg),
+                              style: TextStyle(
+                                  color: c.accent,
+                                  fontWeight: FontWeight.w600)),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text('How far ahead',
+                        style: TextStyle(color: c.muted, fontSize: 12)),
+                    const SizedBox(height: 6),
+                    _SegRow(
+                      options: const ['0', '1', '3', '7'],
+                      labels: const ['Same day', '1 day', '3 days', '7 days'],
+                      current: cfg.reminderLeadDays.toString(),
+                      c: c,
+                      onSelect: (v) => ref
+                          .read(configProvider.notifier)
+                          .update(cfg.copyWith(
+                              reminderLeadDays: int.tryParse(v) ?? 1)),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'A routine that is already overdue is re-notified once '
+                      'a day until you confirm it as paid.',
+                      style:
+                          TextStyle(color: c.muted, fontSize: 12, height: 1.35),
+                    ),
+                  ],
+                  const Divider(height: 20),
+                  _PrefToggle(
+                    label: 'Sync while the app is closed',
+                    description:
+                        'Let Android wake the app to push queued changes and '
+                        'pull new data. Android will not run this more often '
+                        'than every 15 minutes, and may delay it further '
+                        'while the phone is asleep.',
+                    enabled: cfg.backgroundSyncEnabled,
+                    c: c,
+                    onChanged: (v) => ref
+                        .read(configProvider.notifier)
+                        .update(cfg.copyWith(backgroundSyncEnabled: v)),
+                  ),
+                  if (cfg.backgroundSyncEnabled) ...[
+                    const SizedBox(height: 10),
+                    _SegRow(
+                      options: const ['15', '30', '60', '180'],
+                      labels: const ['15 min', '30 min', '1 hour', '3 hours'],
+                      current: cfg.backgroundSyncMinutes.toString(),
+                      c: c,
+                      onSelect: (v) => ref
+                          .read(configProvider.notifier)
+                          .update(cfg.copyWith(
+                              backgroundSyncMinutes: int.tryParse(v) ?? 30)),
+                    ),
+                    const SizedBox(height: 8),
+                    FutureBuilder<DateTime?>(
+                      future: BackgroundSyncService.lastRun(),
+                      builder: (context, snapshot) => Text(
+                        snapshot.data == null
+                            ? 'Has not run yet.'
+                            : 'Last background sync: '
+                                '${_formatDateTime(snapshot.data!)}',
+                        style: TextStyle(color: c.muted, fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+          ],
+
           // ── Appearance ─────────────────────────────────────────
           _SectionTitle('Appearance', c),
           const SizedBox(height: 10),
@@ -388,6 +492,53 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  /// Turning reminders on is the point at which the notification permission
+  /// is actually needed, so it is requested here rather than at launch. If it
+  /// is refused the switch stays off - a silent "on" that never notifies
+  /// would be worse than an honest one.
+  Future<void> _setRemindersEnabled(bool enabled) async {
+    final notifier = ref.read(configProvider.notifier);
+    if (!enabled) {
+      await notifier
+          .update(ref.read(configProvider).copyWith(remindersEnabled: false));
+      return;
+    }
+    final granted = await NotificationService.instance.requestPermission();
+    if (!granted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Notifications are blocked for this app. Enable '
+                'them in Android settings to use reminders.')));
+      }
+      return;
+    }
+    await notifier
+        .update(ref.read(configProvider).copyWith(remindersEnabled: true));
+  }
+
+  Future<void> _pickReminderTime(AppConfig cfg) async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime:
+          TimeOfDay(hour: cfg.reminderHour, minute: cfg.reminderMinute),
+    );
+    if (picked == null) return;
+    await ref.read(configProvider.notifier).update(cfg.copyWith(
+          reminderHour: picked.hour,
+          reminderMinute: picked.minute,
+        ));
+  }
+
+  String _formatTime(AppConfig cfg) =>
+      '${cfg.reminderHour.toString().padLeft(2, '0')}:'
+      '${cfg.reminderMinute.toString().padLeft(2, '0')}';
+
+  String _formatDateTime(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')} '
+      '${d.hour.toString().padLeft(2, '0')}:'
+      '${d.minute.toString().padLeft(2, '0')}';
+
   Widget _card(AppColors c, Widget child) => Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
@@ -450,6 +601,59 @@ class _FeatureToggle extends StatelessWidget {
               const SizedBox(height: 2),
               Text(
                 feature.description,
+                style: TextStyle(color: c.muted, fontSize: 12, height: 1.35),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Switch(
+          value: enabled,
+          activeColor: c.accent,
+          onChanged: onChanged,
+        ),
+      ],
+    );
+  }
+}
+
+/// Same shape as [_FeatureToggle], but for preferences that live in
+/// [AppConfig] rather than the [AppFeatures] registry.
+class _PrefToggle extends StatelessWidget {
+  final String label;
+  final String description;
+  final bool enabled;
+  final AppColors c;
+  final ValueChanged<bool> onChanged;
+
+  const _PrefToggle({
+    required this.label,
+    required this.description,
+    required this.enabled,
+    required this.c,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  color: c.ink,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                description,
                 style: TextStyle(color: c.muted, fontSize: 12, height: 1.35),
               ),
             ],

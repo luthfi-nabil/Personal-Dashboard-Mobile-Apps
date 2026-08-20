@@ -8,6 +8,10 @@ import 'models.dart';
 /// Max time to wait for transaction-api / health-api to respond.
 const _requestTimeout = Duration(seconds: 10);
 
+/// How long one API host keeps counting as unreachable after a request to it
+/// failed to get any answer. See [ApiReachability].
+const _unreachableCooldown = Duration(seconds: 15);
+
 /// Thrown when transaction-api / health-api return an error response.
 class ApiException implements Exception {
   final String message;
@@ -31,6 +35,56 @@ class ApiUnavailableException extends ApiException {
 /// of routing the user back to `/login`.
 class ApiUnauthorizedException extends ApiException {
   const ApiUnauthorizedException(super.message);
+}
+
+/// Short-lived memory of "this API host just failed to answer".
+///
+/// Saving one transaction while the API is down fires a whole burst of calls:
+/// the write itself, then every step of `SyncService.syncNow()` (options,
+/// transactions, deletes, planning, health writes) and finally the refresh,
+/// which fetches several endpoints in sequence. Without this, each of those
+/// waits out its own [_requestTimeout], so the Save button stayed busy for
+/// well over a minute. Once one call has proven a host unreachable, further
+/// calls to that host fail immediately instead - the queued-locally path is
+/// reached in a moment rather than after a chain of timeouts.
+///
+/// State is kept per host (`uri.origin`) because health-api can be down while
+/// transaction-api is fine, and one should never gag the other.
+class ApiReachability {
+  static final ApiReachability instance = ApiReachability._();
+  ApiReachability._();
+
+  final Map<String, DateTime> _downUntil = {};
+
+  bool isDown(Uri uri) {
+    final until = _downUntil[uri.origin];
+    if (until == null) return false;
+    if (DateTime.now().isBefore(until)) return true;
+    _downUntil.remove(uri.origin);
+    return false;
+  }
+
+  /// `true` while any host is inside its cooldown. Used to decide whether
+  /// there is any point kicking off a sync right now.
+  bool get anyDown {
+    _downUntil.removeWhere((_, until) => !DateTime.now().isBefore(until));
+    return _downUntil.isNotEmpty;
+  }
+
+  void markDown(Uri uri) =>
+      _downUntil[uri.origin] = DateTime.now().add(_unreachableCooldown);
+
+  /// Drops the cooldown, either because a request just got through or because
+  /// something wants the next call to genuinely try again - a manual sync, a
+  /// login attempt, or connectivity coming back. Clears every host when [uri]
+  /// is omitted.
+  void clear([Uri? uri]) {
+    if (uri == null) {
+      _downUntil.clear();
+    } else {
+      _downUntil.remove(uri.origin);
+    }
+  }
 }
 
 /// Thin REST client for:
@@ -106,6 +160,22 @@ class RemoteApi {
     developer.log('→ $method $uri${body != null ? ' $body' : ''}',
         name: 'RemoteApi');
     final requestBody = body != null ? jsonEncode(body) : null;
+    // A request to a host that just failed is not sent at all - it would only
+    // wait out the timeout again. Still logged, so the API Watcher screen
+    // shows why nothing went out.
+    if (ApiReachability.instance.isDown(uri)) {
+      developer.log('✗ $method $uri skipped - host marked unreachable',
+          name: 'RemoteApi', level: 900);
+      ApiCallLog.instance.add(ApiCallEntry(
+        time: DateTime.now(),
+        method: method,
+        uri: uri,
+        duration: Duration.zero,
+        error: 'Skipped - API unreachable (retrying in a moment)',
+        requestBody: requestBody,
+      ));
+      throw ApiUnavailableException('API unreachable: $method $uri');
+    }
     final sw = Stopwatch()..start();
     http.Response res;
     try {
@@ -121,6 +191,7 @@ class RemoteApi {
         error: 'Timed out after ${_requestTimeout.inSeconds}s',
         requestBody: requestBody,
       ));
+      ApiReachability.instance.markDown(uri);
       throw ApiUnavailableException('Request timed out: $method $uri');
     } catch (e) {
       developer.log('✗ $method $uri failed: $e',
@@ -135,8 +206,11 @@ class RemoteApi {
       ));
       // Connection refused / DNS failure / etc. - the API is unreachable,
       // not just returning an error, so treat the same as a timeout.
+      ApiReachability.instance.markDown(uri);
       throw ApiUnavailableException('Could not reach $method $uri: $e');
     }
+    // Any answer - even a 4xx/5xx - proves the host is up again.
+    ApiReachability.instance.clear(uri);
     developer.log('← $method $uri (${res.statusCode})', name: 'RemoteApi');
     ApiCallLog.instance.add(ApiCallEntry(
       time: DateTime.now(),
@@ -176,14 +250,18 @@ class RemoteApi {
     String? email,
     String? phoneNumber,
     String? telegramUsername,
-  }) async =>
-      Map<String, dynamic>.from(await _post(_authUri('/register'), {
-        'username': username,
-        'password': password,
-        'email': email,
-        'phone_number': phoneNumber,
-        'telegram_username': telegramUsername,
-      }) as Map);
+  }) async {
+    // Tapping Register is the user retrying by hand, so never short-circuit
+    // it on a stale unreachable flag.
+    ApiReachability.instance.clear(_authUri('/register'));
+    return Map<String, dynamic>.from(await _post(_authUri('/register'), {
+      'username': username,
+      'password': password,
+      'email': email,
+      'phone_number': phoneNumber,
+      'telegram_username': telegramUsername,
+    }) as Map);
+  }
 
   /// `POST /api/auth/login`. Returns an [AuthResponse]-shaped map containing
   /// `token`, `token_type`, `expires_in`, `username`, `user_id`, `email`,
@@ -191,11 +269,14 @@ class RemoteApi {
   Future<Map<String, dynamic>> login({
     required String username,
     required String password,
-  }) async =>
-      Map<String, dynamic>.from(await _post(_authUri('/login'), {
-        'username': username,
-        'password': password,
-      }) as Map);
+  }) async {
+    // See [register]: a hand-typed sign-in always gets a real attempt.
+    ApiReachability.instance.clear(_authUri('/login'));
+    return Map<String, dynamic>.from(await _post(_authUri('/login'), {
+      'username': username,
+      'password': password,
+    }) as Map);
+  }
 
   /// `GET /api/auth/me`. Requires [cfg.authToken] to be set. Useful to
   /// confirm a stored token is still valid and refresh the cached profile.
@@ -420,46 +501,6 @@ class RemoteApi {
   Future<void> deletePlannedExpense(String id) async =>
       _delete(_txnUri('/planned-expenses/$id'));
 
-  Future<List<Map<String, dynamic>>> getWishlist() => getPlannedExpenses();
-
-  Future<Map<String, dynamic>> createWishlist({
-    required String id,
-    required String itemName,
-    required double price,
-    String? notes,
-    required String priority,
-    String transactionType = 'spending',
-    String? categoryId,
-    String? categoryName,
-    String? createdDate,
-  }) =>
-      createPlannedExpense(
-        id: id,
-        itemName: itemName,
-        price: price,
-        transactionType: transactionType,
-        categoryId: categoryId,
-        categoryName: categoryName,
-        notes: notes,
-        priority: priority,
-        createdDate: createdDate,
-      );
-
-  Future<void> updateWishlistStatus({
-    required String id,
-    required String status,
-    double? fulfilledPrice,
-    String? changedAt,
-  }) =>
-      updatePlannedExpenseStatus(
-        id: id,
-        status: status,
-        fulfilledPrice: fulfilledPrice,
-        changedAt: changedAt,
-      );
-
-  Future<void> deleteWishlist(String id) => deletePlannedExpense(id);
-
   // ── transaction-api: consumables ───────────────────────────────────────
   Future<List<Map<String, dynamic>>> getConsumables() async =>
       _list(await _get(_txnUri('/consumables')));
@@ -492,6 +533,41 @@ class RemoteApi {
 
   Future<void> deleteConsumable(String id) async =>
       _delete(_txnUri('/consumables/$id'));
+
+  // ── transaction-api: planned transactions ──────────────────────────────
+  Future<List<Map<String, dynamic>>> getPlannedTransactions() async =>
+      _list(await _get(_txnUri('/planned-transactions')));
+
+  /// Saves one bundle header. Posting an id that already exists updates its
+  /// name, so a write queued offline can be retried safely.
+  Future<Map<String, dynamic>> createPlannedTransaction({
+    required String id,
+    required String name,
+    String? createdDate,
+  }) async =>
+      Map<String, dynamic>.from(await _post(_txnUri('/planned-transactions'), {
+        'planned_transaction_id': id,
+        'name': name,
+        if (createdDate != null && createdDate.isNotEmpty)
+          'created_date': createdDate,
+      }) as Map);
+
+  Future<List<Map<String, dynamic>>> getPlannedTransactionDetails(
+          {String? plannedTransactionId}) async =>
+      _list(await _get(_txnUri('/planned-transaction-details', {
+        if (plannedTransactionId != null && plannedTransactionId.isNotEmpty)
+          'planned_transaction_id': plannedTransactionId,
+      })));
+
+  /// Tags one item into an existing bundle. Posting an id that already exists
+  /// updates it, so a write queued offline can be retried safely.
+  Future<Map<String, dynamic>> createPlannedTransactionDetail(
+    String plannedTransactionId,
+    Map<String, dynamic> payload,
+  ) async =>
+      Map<String, dynamic>.from(await _post(
+          _txnUri('/planned-transactions/$plannedTransactionId/details'),
+          payload) as Map);
 
   // ── transaction-api: investments ───────────────────────────────────────
   Future<List<Map<String, dynamic>>> getInvestments() async =>

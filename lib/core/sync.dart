@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'config.dart';
 import 'db.dart';
+import 'remote_api.dart';
 import 'repo.dart';
 
 enum SyncStatus { idle, syncing, done, error }
@@ -16,7 +17,17 @@ class SyncService {
   SyncService._();
 
   bool _online = true;
+
+  /// Whether the device has a network interface at all. This says nothing
+  /// about the APIs themselves - a phone on wifi with the server down is
+  /// still "online" here, which is why [canReachApi] exists.
   bool get isOnline => _online;
+
+  /// `true` when there is a network *and* no recent request proved an API
+  /// host unreachable. Callers use it to skip work that could only wait out
+  /// timeouts - most importantly the sync that follows a write that was just
+  /// queued locally because the API was down.
+  bool get canReachApi => _online && !ApiReachability.instance.anyDown;
 
   Timer? _timer;
   StreamSubscription<List<ConnectivityResult>>? _connSub;
@@ -70,7 +81,12 @@ class SyncService {
     _connSub = Connectivity().onConnectivityChanged.listen((results) {
       final wasOnline = _online;
       _online = results.any((r) => r != ConnectivityResult.none);
-      if (!wasOnline && _online) syncNow();
+      if (!wasOnline && _online) {
+        // A different network may well reach the APIs, so forget what the
+        // previous one proved.
+        ApiReachability.instance.clear();
+        syncNow();
+      }
     });
 
     ConfigService.instance.addListener(_restartTimer);
@@ -110,6 +126,10 @@ class SyncService {
     if (!cfg.isLoggedIn || !_online) return false;
 
     _emit(SyncStatus.syncing);
+    // Every sync cycle is entitled to one honest attempt per host: the flag is
+    // dropped here, and the first step that fails re-arms it so the remaining
+    // steps below fail instantly instead of each waiting out its own timeout.
+    ApiReachability.instance.clear();
     try {
       // Flags toggled while the API was unreachable go up first, so the
       // refresh below reads back what this device already shows.

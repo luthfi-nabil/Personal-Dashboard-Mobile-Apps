@@ -504,6 +504,194 @@ class Consumable {
       );
 }
 
+/// A named bundle built up from real purchases - e.g. "Camping trip" - so
+/// items tagged from several transactions over time can be seen and totaled
+/// together. Unlike [PlannedExpenseItem] this has no status/fulfillment: just
+/// a name and a running list. Maps onto transaction-api's `planned_transaction`
+/// table.
+class PlannedTransaction {
+  final String id;
+  final String name;
+  final String createdDate;
+  final String updatedAt;
+  final String syncState;
+
+  const PlannedTransaction({
+    required this.id,
+    required this.name,
+    required this.createdDate,
+    required this.updatedAt,
+    this.syncState = 'synced',
+  });
+
+  factory PlannedTransaction.fromMap(Map<String, dynamic> m) => PlannedTransaction(
+        id: m['id'] as String,
+        name: m['name'] as String,
+        createdDate: m['createdDate'] as String,
+        updatedAt: m['updatedAt'] as String,
+        syncState: m['syncState'] as String? ?? 'synced',
+      );
+
+  /// Builds a header from a `planned_transaction` row returned by transaction-api.
+  factory PlannedTransaction.fromApi(Map<String, dynamic> m) => PlannedTransaction(
+        id: m['planned_transaction_id'] as String,
+        name: m['name'] as String? ?? '',
+        createdDate: (m['created_date'] ?? '').toString(),
+        updatedAt: (m['updated_date'] ?? m['created_date'] ?? '').toString(),
+        syncState: 'synced',
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'name': name,
+        'createdDate': createdDate,
+        'updatedAt': updatedAt,
+        'syncState': syncState,
+      };
+
+  /// Request shape expected by `POST /api/user/planned-transactions`.
+  Map<String, dynamic> toApiPayload() => {
+        'planned_transaction_id': id,
+        'name': name,
+        'created_date': createdDate,
+      };
+
+  PlannedTransaction copyWith({
+    String? id,
+    String? name,
+    String? createdDate,
+    String? updatedAt,
+    String? syncState,
+  }) =>
+      PlannedTransaction(
+        id: id ?? this.id,
+        name: name ?? this.name,
+        createdDate: createdDate ?? this.createdDate,
+        updatedAt: updatedAt ?? this.updatedAt,
+        syncState: syncState ?? this.syncState,
+      );
+}
+
+/// One item tagged into a [PlannedTransaction]. [transactionId] /
+/// [transactionDetailId] point back at the real transaction line item it came
+/// from. Maps onto transaction-api's `planned_transaction_detail` table.
+class PlannedTransactionDetail {
+  final String id;
+  final String plannedTransactionId;
+  final String itemName;
+  final double quantity;
+  final double unitPrice;
+  final double amount;
+  final String note;
+  final String transactionId;
+  final String transactionDetailId;
+  final String createdDate;
+  final String syncState;
+
+  const PlannedTransactionDetail({
+    required this.id,
+    required this.plannedTransactionId,
+    required this.itemName,
+    this.quantity = 1,
+    this.unitPrice = 0,
+    this.amount = 0,
+    this.note = '',
+    this.transactionId = '',
+    this.transactionDetailId = '',
+    required this.createdDate,
+    this.syncState = 'synced',
+  });
+
+  double get lineTotal => amount != 0 ? amount : quantity * unitPrice;
+
+  factory PlannedTransactionDetail.fromMap(Map<String, dynamic> m) =>
+      PlannedTransactionDetail(
+        id: m['id'] as String,
+        plannedTransactionId: m['plannedTransactionId'] as String,
+        itemName: m['itemName'] as String? ?? '',
+        quantity: (m['quantity'] as num?)?.toDouble() ?? 1,
+        unitPrice: (m['unitPrice'] as num?)?.toDouble() ?? 0,
+        amount: (m['amount'] as num?)?.toDouble() ?? 0,
+        note: m['note'] as String? ?? '',
+        transactionId: m['transactionId'] as String? ?? '',
+        transactionDetailId: m['transactionDetailId'] as String? ?? '',
+        createdDate: m['createdDate'] as String,
+        syncState: m['syncState'] as String? ?? 'synced',
+      );
+
+  /// Builds a row from a `planned_transaction_detail` row returned by transaction-api.
+  factory PlannedTransactionDetail.fromApi(Map<String, dynamic> m) =>
+      PlannedTransactionDetail(
+        id: m['planned_transaction_detail_id'] as String,
+        plannedTransactionId: m['planned_transaction_id'] as String,
+        itemName: m['item_name'] as String? ?? '',
+        quantity: (m['quantity'] as num?)?.toDouble() ?? 1,
+        unitPrice: (m['unit_price'] as num?)?.toDouble() ?? 0,
+        amount: (m['amount'] as num?)?.toDouble() ?? 0,
+        note: m['note'] as String? ?? '',
+        transactionId: (m['spending_id'] ?? '').toString(),
+        transactionDetailId: (m['spending_detail_id'] ?? '').toString(),
+        createdDate: (m['created_date'] ?? '').toString(),
+        syncState: 'synced',
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'plannedTransactionId': plannedTransactionId,
+        'itemName': itemName,
+        'quantity': quantity,
+        'unitPrice': unitPrice,
+        'amount': amount,
+        'note': note,
+        'transactionId': transactionId,
+        'transactionDetailId': transactionDetailId,
+        'createdDate': createdDate,
+        'syncState': syncState,
+      };
+
+  /// Request shape expected by
+  /// `POST /api/user/planned-transactions/{id}/details`.
+  Map<String, dynamic> toApiPayload() => {
+        'planned_transaction_detail_id': id,
+        'item_name': itemName,
+        'quantity': quantity,
+        'unit_price': unitPrice,
+        'amount': lineTotal,
+        'note': note,
+        if (transactionId.isNotEmpty) 'spending_id': transactionId,
+        if (transactionDetailId.isNotEmpty)
+          'spending_detail_id': transactionDetailId,
+        'created_date': createdDate,
+      };
+
+  PlannedTransactionDetail copyWith({
+    String? id,
+    String? plannedTransactionId,
+    String? itemName,
+    double? quantity,
+    double? unitPrice,
+    double? amount,
+    String? note,
+    String? transactionId,
+    String? transactionDetailId,
+    String? createdDate,
+    String? syncState,
+  }) =>
+      PlannedTransactionDetail(
+        id: id ?? this.id,
+        plannedTransactionId: plannedTransactionId ?? this.plannedTransactionId,
+        itemName: itemName ?? this.itemName,
+        quantity: quantity ?? this.quantity,
+        unitPrice: unitPrice ?? this.unitPrice,
+        amount: amount ?? this.amount,
+        note: note ?? this.note,
+        transactionId: transactionId ?? this.transactionId,
+        transactionDetailId: transactionDetailId ?? this.transactionDetailId,
+        createdDate: createdDate ?? this.createdDate,
+        syncState: syncState ?? this.syncState,
+      );
+}
+
 /// What a holding on the Investment page actually is. The string values are
 /// the `kind` column in transaction-api's `investment` table — never rename
 /// one without a migration, since rows carry it verbatim.
@@ -728,6 +916,29 @@ class AppConfig {
   /// flag added in a later release turns itself on without a migration.
   final Map<String, bool> features;
 
+  /// Whether routine transactions raise a local notification as they come
+  /// due. Off by default: the OS asks for notification permission the first
+  /// time this is enabled, and that prompt should follow a deliberate choice
+  /// rather than ambush someone on first launch.
+  final bool remindersEnabled;
+
+  /// Time of day reminders fire, as local wall-clock.
+  final int reminderHour;
+  final int reminderMinute;
+
+  /// How many days before the due date to notify. `0` means on the day.
+  final int reminderLeadDays;
+
+  /// Whether the OS is allowed to wake the app periodically to sync while it
+  /// is closed. Distinct from [autoSync], which only covers the in-process
+  /// timer that runs while the app is on screen.
+  final bool backgroundSyncEnabled;
+
+  /// Requested gap between background syncs. Android's WorkManager will not
+  /// go below 15 minutes and treats this as a floor rather than a promise -
+  /// Doze can stretch it considerably.
+  final int backgroundSyncMinutes;
+
   const AppConfig({
     this.apiBase = 'http://127.0.0.1:8080',
     this.healthBase = 'http://127.0.0.1:8082',
@@ -745,6 +956,12 @@ class AppConfig {
     this.tokenExpiresAt = '',
     this.userId = '',
     this.features = const {},
+    this.remindersEnabled = false,
+    this.reminderHour = 9,
+    this.reminderMinute = 0,
+    this.reminderLeadDays = 1,
+    this.backgroundSyncEnabled = true,
+    this.backgroundSyncMinutes = 30,
   });
 
   /// Whether the optional feature [featureId] is switched on. Unknown or
@@ -795,6 +1012,12 @@ class AppConfig {
       tokenExpiresAt: m['tokenExpiresAt'] as String? ?? '',
       userId: m['userId'] as String? ?? '',
       features: _parseFeatures(m['features']),
+      remindersEnabled: m['remindersEnabled'] as bool? ?? false,
+      reminderHour: m['reminderHour'] as int? ?? 9,
+      reminderMinute: m['reminderMinute'] as int? ?? 0,
+      reminderLeadDays: m['reminderLeadDays'] as int? ?? 1,
+      backgroundSyncEnabled: m['backgroundSyncEnabled'] as bool? ?? true,
+      backgroundSyncMinutes: m['backgroundSyncMinutes'] as int? ?? 30,
     );
   }
 
@@ -815,6 +1038,12 @@ class AppConfig {
         'tokenExpiresAt': tokenExpiresAt,
         'userId': userId,
         'features': features,
+        'remindersEnabled': remindersEnabled,
+        'reminderHour': reminderHour,
+        'reminderMinute': reminderMinute,
+        'reminderLeadDays': reminderLeadDays,
+        'backgroundSyncEnabled': backgroundSyncEnabled,
+        'backgroundSyncMinutes': backgroundSyncMinutes,
       });
 
   AppConfig copyWith({
@@ -834,6 +1063,12 @@ class AppConfig {
     String? tokenExpiresAt,
     String? userId,
     Map<String, bool>? features,
+    bool? remindersEnabled,
+    int? reminderHour,
+    int? reminderMinute,
+    int? reminderLeadDays,
+    bool? backgroundSyncEnabled,
+    int? backgroundSyncMinutes,
   }) =>
       AppConfig(
         apiBase: apiBase ?? this.apiBase,
@@ -852,6 +1087,14 @@ class AppConfig {
         tokenExpiresAt: tokenExpiresAt ?? this.tokenExpiresAt,
         userId: userId ?? this.userId,
         features: features ?? this.features,
+        remindersEnabled: remindersEnabled ?? this.remindersEnabled,
+        reminderHour: reminderHour ?? this.reminderHour,
+        reminderMinute: reminderMinute ?? this.reminderMinute,
+        reminderLeadDays: reminderLeadDays ?? this.reminderLeadDays,
+        backgroundSyncEnabled:
+            backgroundSyncEnabled ?? this.backgroundSyncEnabled,
+        backgroundSyncMinutes:
+            backgroundSyncMinutes ?? this.backgroundSyncMinutes,
       );
 }
 
@@ -862,7 +1105,7 @@ class AppData {
 
   /// Line items for spending transactions, keyed by [TransactionDetail.transactionId].
   final List<TransactionDetail> transactionDetails;
-  final List<WishlistItem> wishlistItems;
+  final List<PlannedExpenseItem> plannedExpenseItems;
   final List<RoutineTransaction> routineTransactions;
   final List<RoutinePayment> routinePayments;
 
@@ -871,6 +1114,12 @@ class AppData {
 
   /// Reksa dana, gold and silver holdings. See [Investment].
   final List<Investment> investments;
+
+  /// Named bundles built up from real purchases. See [PlannedTransaction].
+  final List<PlannedTransaction> plannedTransactions;
+
+  /// Items tagged into a [PlannedTransaction]. See [PlannedTransactionDetail].
+  final List<PlannedTransactionDetail> plannedTransactionDetails;
   final List<InsulinItem> insulinItems;
   final List<InsulinAssign> insulinAssigns;
   final List<InsulinUsage> insulinUsages;
@@ -881,11 +1130,13 @@ class AppData {
     required this.categories,
     required this.transactions,
     this.transactionDetails = const [],
-    this.wishlistItems = const [],
+    this.plannedExpenseItems = const [],
     this.routineTransactions = const [],
     this.routinePayments = const [],
     this.consumables = const [],
     this.investments = const [],
+    this.plannedTransactions = const [],
+    this.plannedTransactionDetails = const [],
     this.insulinItems = const [],
     this.insulinAssigns = const [],
     this.insulinUsages = const [],
@@ -897,6 +1148,13 @@ class AppData {
   List<TransactionDetail> detailsFor(String transactionId) => transactionDetails
       .where((d) => d.transactionId == transactionId)
       .toList();
+
+  /// The items tagged into [plannedTransactionId].
+  List<PlannedTransactionDetail> plannedTransactionDetailsFor(
+          String plannedTransactionId) =>
+      plannedTransactionDetails
+          .where((d) => d.plannedTransactionId == plannedTransactionId)
+          .toList();
 }
 
 class PendingDelete {
@@ -1011,7 +1269,7 @@ class DailyActivity {
       };
 }
 
-class WishlistItem {
+class PlannedExpenseItem {
   final String id;
   final String itemName;
   final double price;
@@ -1028,7 +1286,7 @@ class WishlistItem {
   final String updatedAt;
   final String syncState;
 
-  const WishlistItem({
+  const PlannedExpenseItem({
     required this.id,
     required this.itemName,
     required this.price,
@@ -1046,10 +1304,8 @@ class WishlistItem {
     this.syncState = 'synced',
   });
 
-  factory WishlistItem.fromMap(Map<String, dynamic> m) => WishlistItem(
-        id: m['planned_expense_id'] as String? ??
-            m['wishlist_id'] as String? ??
-            m['id'] as String,
+  factory PlannedExpenseItem.fromMap(Map<String, dynamic> m) => PlannedExpenseItem(
+        id: m['planned_expense_id'] as String? ?? m['id'] as String,
         itemName: m['item_name'] as String? ?? m['itemName'] as String,
         price: (m['price'] as num).toDouble(),
         transactionType: m['transaction_type'] as String? ??
@@ -1093,7 +1349,7 @@ class WishlistItem {
         'syncState': syncState,
       };
 
-  WishlistItem copyWith({
+  PlannedExpenseItem copyWith({
     String? id,
     String? itemName,
     double? price,
@@ -1110,7 +1366,7 @@ class WishlistItem {
     String? updatedAt,
     String? syncState,
   }) =>
-      WishlistItem(
+      PlannedExpenseItem(
         id: id ?? this.id,
         itemName: itemName ?? this.itemName,
         price: price ?? this.price,

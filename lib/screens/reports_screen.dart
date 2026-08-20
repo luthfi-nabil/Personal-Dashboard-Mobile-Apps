@@ -55,7 +55,7 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
         final totals = monthTotals(data.transactions, _ym);
         final cats = spendByCategory(data.transactions, _ym);
         final flow = cashflowByMonth(data.transactions);
-        final plannedByCategory = _plannedByCategory(data.wishlistItems);
+        final plannedByCategory = _plannedByCategory(data.plannedExpenseItems);
         final plannedSpendingTotal = plannedByCategory
             .where((entry) => entry.type == 'spending')
             .fold<double>(0, (sum, entry) => sum + entry.amount);
@@ -653,7 +653,7 @@ Color _activityCategoryColor(String category) {
 }
 
 List<({String name, String type, int count, double amount, Color color})>
-    _plannedByCategory(List<WishlistItem> items) {
+    _plannedByCategory(List<PlannedExpenseItem> items) {
   final totals =
       <String, ({String name, String type, int count, double amount})>{};
   for (final item in items.where((item) => item.status == 'active')) {

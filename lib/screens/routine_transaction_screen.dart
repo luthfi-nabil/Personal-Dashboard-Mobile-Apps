@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/db.dart';
 import '../core/models.dart';
+import '../core/notifications.dart';
 import '../core/repo.dart';
+import '../core/routine_schedule.dart';
 import '../core/utils.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
@@ -16,6 +19,10 @@ class RoutineTransactionScreen extends ConsumerWidget {
     final c = AppTheme.colorsOf(context);
     final cfg = ref.watch(configProvider);
     final dataAsync = ref.watch(appDataProvider);
+    // Mutes are a local preference and load in a blink; treating a pending
+    // read as "nothing muted" avoids a spinner over the whole list.
+    final muted =
+        ref.watch(mutedRoutineIdsProvider).valueOrNull ?? const <String>{};
 
     return dataAsync.when(
       loading: () => Center(child: CircularProgressIndicator(color: c.accent)),
@@ -101,8 +108,11 @@ class RoutineTransactionScreen extends ConsumerWidget {
                     item: item,
                     currency: cfg.currency,
                     c: c,
+                    remindersOn: cfg.remindersEnabled,
+                    muted: muted.contains(item.id),
                     onBought: () => _openBoughtDialog(context, ref, item, data),
                     onRemove: () => _remove(context, ref, item),
+                    onToggleMute: () => _toggleMute(ref, item, muted),
                   )),
             const SizedBox(height: 20),
             _SectionTitle('History (${data.routinePayments.length})', c),
@@ -165,6 +175,22 @@ class RoutineTransactionScreen extends ConsumerWidget {
     if (confirmed != true) return;
     await Repo.instance.removeRoutineTransaction(item);
     await ref.read(appDataProvider.notifier).refresh();
+  }
+
+  /// Silences (or un-silences) reminders for a single routine, then rebuilds
+  /// the notification schedule so the change is felt immediately rather than
+  /// at the next sync.
+  Future<void> _toggleMute(
+      WidgetRef ref, RoutineTransaction item, Set<String> muted) async {
+    final userId = ref.read(configProvider).userId;
+    await AppDb.instance
+        .setRoutineReminderMuted(item.id, userId, !muted.contains(item.id));
+    ref.invalidate(mutedRoutineIdsProvider);
+    final data = await ref.read(appDataProvider.future);
+    await NotificationService.instance.syncRoutineReminders(
+      routines: data.routineTransactions,
+      config: ref.read(configProvider),
+    );
   }
 }
 
@@ -325,19 +351,31 @@ class _RoutineCard extends StatelessWidget {
   final RoutineTransaction item;
   final String currency;
   final AppColors c;
+
+  /// Whether reminders are on at all. When they are off there is nothing to
+  /// mute, so the per-routine control and the muted badge are hidden.
+  final bool remindersOn;
+  final bool muted;
   final VoidCallback onBought;
   final VoidCallback onRemove;
+  final VoidCallback onToggleMute;
 
   const _RoutineCard({
     required this.item,
     required this.currency,
     required this.c,
+    required this.remindersOn,
+    required this.muted,
     required this.onBought,
     required this.onRemove,
+    required this.onToggleMute,
   });
 
   @override
   Widget build(BuildContext context) {
+    final due = nextDueDate(item);
+    final today = dateOnly(DateTime.now());
+    final overdue = due != null && due.isBefore(today);
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(14),
@@ -352,9 +390,21 @@ class _RoutineCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(item.itemName,
-                    style:
-                        TextStyle(fontWeight: FontWeight.w700, color: c.ink)),
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(item.itemName,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontWeight: FontWeight.w700, color: c.ink)),
+                    ),
+                    if (remindersOn && muted) ...[
+                      const SizedBox(width: 6),
+                      Icon(Icons.notifications_off_outlined,
+                          size: 14, color: c.muted),
+                    ],
+                  ],
+                ),
                 const SizedBox(height: 4),
                 Text('${fmtRp(item.price, currency)} - ${item.reminder}',
                     style: TextStyle(color: c.muted, fontSize: 12)),
@@ -363,22 +413,50 @@ class _RoutineCard extends StatelessWidget {
                 if (item.lastBoughtAt != null)
                   Text('Latest: ${fmtDate(item.lastBoughtAt!, 'long')}',
                       style: TextStyle(color: c.muted, fontSize: 12)),
+                if (due != null)
+                  Text(
+                    _dueLabel(due, today),
+                    style: TextStyle(
+                        color: overdue ? c.neg : c.muted,
+                        fontSize: 12,
+                        fontWeight:
+                            overdue ? FontWeight.w600 : FontWeight.w400),
+                  ),
               ],
             ),
           ),
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'bought') onBought();
+              if (value == 'mute') onToggleMute();
               if (value == 'remove') onRemove();
             },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'bought', child: Text('Confirm bought')),
-              PopupMenuItem(value: 'remove', child: Text('Remove')),
+            itemBuilder: (_) => [
+              const PopupMenuItem(
+                  value: 'bought', child: Text('Confirm bought')),
+              if (remindersOn)
+                PopupMenuItem(
+                  value: 'mute',
+                  child: Text(muted ? 'Unmute reminders' : 'Mute reminders'),
+                ),
+              const PopupMenuItem(value: 'remove', child: Text('Remove')),
             ],
           ),
         ],
       ),
     );
+  }
+
+  String _dueLabel(DateTime due, DateTime today) {
+    final days = due.difference(today).inDays;
+    final date = '${due.year}-${due.month.toString().padLeft(2, '0')}-'
+        '${due.day.toString().padLeft(2, '0')}';
+    return switch (days) {
+      0 => 'Due today ($date)',
+      1 => 'Due tomorrow ($date)',
+      < 0 => 'Overdue by ${-days} ${-days == 1 ? 'day' : 'days'} ($date)',
+      _ => 'Due in $days days ($date)',
+    };
   }
 }
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -16,7 +18,7 @@ import 'screens/options_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/activities_screen.dart';
 import 'screens/consumables_screen.dart';
-import 'screens/wishlist_screen.dart';
+import 'screens/planned_expense_screen.dart';
 import 'screens/routine_transaction_screen.dart';
 import 'screens/insulin_shell.dart';
 import 'screens/login_screen.dart';
@@ -25,7 +27,9 @@ import 'screens/api_log_screen.dart';
 import 'screens/pending_sync_screen.dart';
 import 'theme/app_theme.dart';
 import 'providers/providers.dart';
+import 'core/background_sync.dart';
 import 'core/config.dart';
+import 'core/notifications.dart';
 
 final _rootKey = GlobalKey<NavigatorState>();
 final _shellKey = GlobalKey<NavigatorState>();
@@ -83,8 +87,7 @@ final _router = GoRouter(
             path: '/consumables', builder: (c, s) => const ConsumablesScreen()),
         GoRoute(
             path: '/planned-expenses',
-            builder: (c, s) => const WishlistScreen()),
-        GoRoute(path: '/wishlist', builder: (c, s) => const WishlistScreen()),
+            builder: (c, s) => const PlannedExpenseScreen()),
         GoRoute(
             path: '/routine-transactions',
             builder: (c, s) => const RoutineTransactionScreen()),
@@ -174,11 +177,86 @@ final _router = GoRouter(
   ],
 );
 
-class PersonalDashboardApp extends ConsumerWidget {
+class PersonalDashboardApp extends ConsumerStatefulWidget {
   const PersonalDashboardApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PersonalDashboardApp> createState() =>
+      _PersonalDashboardAppState();
+}
+
+class _PersonalDashboardAppState extends ConsumerState<PersonalDashboardApp>
+    with WidgetsBindingObserver {
+  /// Keeps [AppForegroundFlag]'s timestamp fresh so a long foreground session
+  /// never looks stale to the background worker. Well under the five minutes
+  /// after which the flag is ignored.
+  static const _heartbeat = Duration(minutes: 2);
+
+  Timer? _heartbeatTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _enterForeground();
+
+    NotificationService.instance.onSelect = _openRoutines;
+    // A tap that launched the app from cold is not delivered to onSelect -
+    // the plugin was not listening yet - so it has to be collected by hand.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final payload = await NotificationService.instance.takeLaunchPayload();
+      if (payload != null) _openRoutines(payload);
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _heartbeatTimer?.cancel();
+    NotificationService.instance.onSelect = null;
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _enterForeground();
+        // The background worker may have pulled new data into SQLite while
+        // the app was away, so show what is actually cached now.
+        unawaited(ref.read(appDataProvider.notifier).refreshCached());
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        _leaveForeground();
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+        // Transient - a permission dialog or the app switcher. Treating these
+        // as "closed" would let a background sync fight the UI for the
+        // database over something as ordinary as pulling down the shade.
+        break;
+    }
+  }
+
+  void _enterForeground() {
+    unawaited(AppForegroundFlag.set(true));
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer =
+        Timer.periodic(_heartbeat, (_) => unawaited(AppForegroundFlag.beat()));
+  }
+
+  void _leaveForeground() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    unawaited(AppForegroundFlag.set(false));
+  }
+
+  void _openRoutines(String? payload) {
+    if (payload == null || !payload.startsWith('routine')) return;
+    _router.go('/routine-transactions');
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final cfg = ref.watch(configProvider);
     return MaterialApp.router(
       routerConfig: _router,

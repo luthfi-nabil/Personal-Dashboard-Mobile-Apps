@@ -73,7 +73,7 @@ class Repo {
       AppDb.instance.getPendingSources(userId),
       AppDb.instance.getPendingCategories(userId),
       AppDb.instance.getPendingTransactions(userId),
-      AppDb.instance.getPendingWishlistItems(userId),
+      AppDb.instance.getPendingPlannedExpenseItems(userId),
       AppDb.instance.getPendingRoutineTransactions(userId),
       AppDb.instance.getPendingRoutinePayments(userId),
       AppDb.instance.getPendingInsulinItems(userId),
@@ -84,11 +84,13 @@ class Repo {
       AppDb.instance.getPendingTransactionDetails(userId),
       AppDb.instance.getPendingConsumables(userId),
       AppDb.instance.getPendingInvestments(userId),
+      AppDb.instance.getPendingPlannedTransactions(userId),
+      AppDb.instance.getPendingPlannedTransactionDetails(userId),
     ]);
     final pendingSources = results[0] as List<Source>;
     final pendingCategories = results[1] as List<Category>;
     final pendingTransactions = results[2] as List<Transaction>;
-    final pendingWishlistItems = results[3] as List<WishlistItem>;
+    final pendingPlannedExpenseItems = results[3] as List<PlannedExpenseItem>;
     final pendingRoutineTransactions = results[4] as List<RoutineTransaction>;
     final pendingRoutinePayments = results[5] as List<RoutinePayment>;
     final pendingInsulinItems = results[6] as List<InsulinItem>;
@@ -99,6 +101,9 @@ class Repo {
     final pendingTransactionDetails = results[11] as List<TransactionDetail>;
     final pendingConsumables = results[12] as List<Consumable>;
     final pendingInvestments = results[13] as List<Investment>;
+    final pendingPlannedTransactions = results[14] as List<PlannedTransaction>;
+    final pendingPlannedTransactionDetails =
+        results[15] as List<PlannedTransactionDetail>;
     if (results.every((rows) => rows.isEmpty)) return data;
 
     List<T> mergePending<T>(
@@ -145,9 +150,9 @@ class Repo {
       }).toList(),
       (transaction) => transaction.id,
     )..sort((a, b) => b.date.compareTo(a.date));
-    final wishlistItems = mergePending(
-      pendingWishlistItems,
-      data.wishlistItems,
+    final plannedExpenseItems = mergePending(
+      pendingPlannedExpenseItems,
+      data.plannedExpenseItems,
       (item) => item.id,
     )..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     final routineTransactions = mergePending(
@@ -197,16 +202,28 @@ class Repo {
       data.investments,
       (item) => item.id,
     )..sort((a, b) => b.acquiredDate.compareTo(a.acquiredDate));
+    final plannedTransactions = mergePending(
+      pendingPlannedTransactions,
+      data.plannedTransactions,
+      (item) => item.id,
+    )..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final plannedTransactionDetails = mergePending(
+      pendingPlannedTransactionDetails,
+      data.plannedTransactionDetails,
+      (item) => item.id,
+    );
     return AppData(
       sources: sources,
       categories: categories,
       transactions: transactions,
       transactionDetails: transactionDetails,
-      wishlistItems: wishlistItems,
+      plannedExpenseItems: plannedExpenseItems,
       routineTransactions: routineTransactions,
       routinePayments: routinePayments,
       consumables: consumables,
       investments: investments,
+      plannedTransactions: plannedTransactions,
+      plannedTransactionDetails: plannedTransactionDetails,
       insulinItems: insulinItems,
       insulinAssigns: insulinAssigns,
       insulinUsages: insulinUsages,
@@ -219,7 +236,7 @@ class Repo {
       AppDb.instance.getSources(userId),
       AppDb.instance.getCategories(userId),
       AppDb.instance.getTransactions(userId),
-      AppDb.instance.getWishlistItems(userId),
+      AppDb.instance.getPlannedExpenseItems(userId),
       AppDb.instance.getRoutineTransactions(userId),
       AppDb.instance.getRoutinePayments(userId),
       AppDb.instance.getInsulinItems(userId),
@@ -229,12 +246,14 @@ class Repo {
       AppDb.instance.getTransactionDetails(userId),
       AppDb.instance.getConsumables(userId),
       AppDb.instance.getInvestments(userId),
+      AppDb.instance.getPlannedTransactions(userId),
+      AppDb.instance.getPlannedTransactionDetails(userId),
     ]);
     return AppData(
       sources: results[0] as List<Source>,
       categories: results[1] as List<Category>,
       transactions: results[2] as List<Transaction>,
-      wishlistItems: results[3] as List<WishlistItem>,
+      plannedExpenseItems: results[3] as List<PlannedExpenseItem>,
       routineTransactions: results[4] as List<RoutineTransaction>,
       routinePayments: results[5] as List<RoutinePayment>,
       insulinItems: results[6] as List<InsulinItem>,
@@ -244,6 +263,8 @@ class Repo {
       transactionDetails: results[10] as List<TransactionDetail>,
       consumables: results[11] as List<Consumable>,
       investments: results[12] as List<Investment>,
+      plannedTransactions: results[13] as List<PlannedTransaction>,
+      plannedTransactionDetails: results[14] as List<PlannedTransactionDetail>,
     );
   }
 
@@ -257,7 +278,7 @@ class Repo {
       api.getPlannedExpenseCategories(),
       api.getEarnings(),
       api.getSpendings(),
-      api.getWishlist(),
+      api.getPlannedExpenses(),
       api.getRoutines(),
       api.getRoutinePayments(),
     ]);
@@ -267,7 +288,7 @@ class Repo {
     final rawPlannedExpenseCats = results[3];
     final rawEarnings = results[4];
     final rawSpendings = results[5];
-    final rawWishlist = results[6];
+    final rawPlannedExpenses = results[6];
     final rawRoutines = results[7];
     final rawRoutinePayments = results[8];
 
@@ -308,6 +329,27 @@ class Repo {
     }
     final investments =
         fetchedInvestments ?? await AppDb.instance.getInvestments(cfg.userId);
+
+    // And for planned transactions, which an API older than this feature
+    // does not serve at all.
+    List<PlannedTransaction>? fetchedPlannedTransactions;
+    List<PlannedTransactionDetail>? fetchedPlannedTransactionDetails;
+    try {
+      fetchedPlannedTransactions = (await api.getPlannedTransactions())
+          .map(PlannedTransaction.fromApi)
+          .toList();
+      fetchedPlannedTransactionDetails =
+          (await api.getPlannedTransactionDetails())
+              .map(PlannedTransactionDetail.fromApi)
+              .toList();
+    } catch (_) {
+      fetchedPlannedTransactions = null;
+      fetchedPlannedTransactionDetails = null;
+    }
+    final plannedTransactions = fetchedPlannedTransactions ??
+        await AppDb.instance.getPlannedTransactions(cfg.userId);
+    final plannedTransactionDetails = fetchedPlannedTransactionDetails ??
+        await AppDb.instance.getPlannedTransactionDetails(cfg.userId);
 
     String? transferCategoryName;
     try {
@@ -365,7 +407,8 @@ class Repo {
 
     final transactions =
         _pairTransfers(rawEarnings, rawSpendings, transferCategoryName);
-    final wishlistItems = rawWishlist.map(WishlistItem.fromMap).toList();
+    final plannedExpenseItems =
+        rawPlannedExpenses.map(PlannedExpenseItem.fromMap).toList();
     final routineTransactions =
         rawRoutines.map(RoutineTransaction.fromMap).toList();
     final routinePayments =
@@ -403,11 +446,13 @@ class Repo {
       categories: categories,
       transactions: transactions,
       transactionDetails: transactionDetails,
-      wishlistItems: wishlistItems,
+      plannedExpenseItems: plannedExpenseItems,
       routineTransactions: routineTransactions,
       routinePayments: routinePayments,
       consumables: consumables,
       investments: investments,
+      plannedTransactions: plannedTransactions,
+      plannedTransactionDetails: plannedTransactionDetails,
       insulinItems: insulinItems,
       insulinAssigns: insulinAssigns,
       insulinUsages: insulinUsages,
@@ -523,12 +568,17 @@ class Repo {
     await AppDb.instance.replaceTransactions(data.transactions, userId);
     await AppDb.instance
         .replaceTransactionDetails(data.transactionDetails, userId);
-    await AppDb.instance.replaceWishlistItems(data.wishlistItems, userId);
+    await AppDb.instance
+        .replacePlannedExpenseItems(data.plannedExpenseItems, userId);
     await AppDb.instance
         .replaceRoutineTransactions(data.routineTransactions, userId);
     await AppDb.instance.replaceRoutinePayments(data.routinePayments, userId);
     await AppDb.instance.replaceConsumables(data.consumables, userId);
     await AppDb.instance.replaceInvestments(data.investments, userId);
+    await AppDb.instance
+        .replacePlannedTransactions(data.plannedTransactions, userId);
+    await AppDb.instance.replacePlannedTransactionDetails(
+        data.plannedTransactionDetails, userId);
     await AppDb.instance.replaceInsulinItems(data.insulinItems, userId);
     await AppDb.instance.replaceInsulinAssigns(data.insulinAssigns, userId);
     await AppDb.instance.replaceInsulinUsages(data.insulinUsages, userId);
@@ -648,18 +698,8 @@ class Repo {
     // Stamped once, before the API is even tried, so the transaction carries
     // the moment it was entered whichever branch it takes.
     final enteredAt = _nowGmtPlus7Iso();
-    try {
-      await _withTokenRefresh(() => RemoteApi(_cfg).createEarning(
-            totalAmount: amount,
-            description: description,
-            earningCategoryId: category.id,
-            earningCategory: category.name,
-            sourceId: source.id,
-            source: source.name,
-            createdDate: enteredAt,
-          ));
-      return false;
-    } on ApiUnavailableException {
+
+    Future<bool> savePending() async {
       await _queuePending(Transaction(
         id: _uuid.v4(),
         type: 'earning',
@@ -672,6 +712,25 @@ class Repo {
         updatedAt: _nowIso(),
       ));
       return true;
+    }
+
+    // With no network there is nothing to try - queue straight away rather
+    // than making the user watch a request that cannot succeed.
+    if (!SyncService.instance.isOnline) return savePending();
+
+    try {
+      await _withTokenRefresh(() => RemoteApi(_cfg).createEarning(
+            totalAmount: amount,
+            description: description,
+            earningCategoryId: category.id,
+            earningCategory: category.name,
+            sourceId: source.id,
+            source: source.name,
+            createdDate: enteredAt,
+          ));
+      return false;
+    } on ApiUnavailableException {
+      return savePending();
     }
   }
 
@@ -689,19 +748,8 @@ class Repo {
     List<TransactionDetail> details = const [],
   }) async {
     final enteredAt = _nowGmtPlus7Iso();
-    try {
-      await _withTokenRefresh(() => RemoteApi(_cfg).createSpending(
-            totalAmount: amount,
-            description: description,
-            spendingCategoryId: category.id,
-            spendingCategory: category.name,
-            sourceId: source.id,
-            source: source.name,
-            details: details.map((d) => d.toApiPayload()).toList(),
-            createdDate: enteredAt,
-          ));
-      return false;
-    } on ApiUnavailableException {
+
+    Future<bool> savePending() async {
       final localId = _uuid.v4();
       await _queuePending(Transaction(
         id: localId,
@@ -716,6 +764,25 @@ class Repo {
       ));
       await _queuePendingDetails(localId, details);
       return true;
+    }
+
+    // See [createEarning]: offline means queue now, don't wait on a request.
+    if (!SyncService.instance.isOnline) return savePending();
+
+    try {
+      await _withTokenRefresh(() => RemoteApi(_cfg).createSpending(
+            totalAmount: amount,
+            description: description,
+            spendingCategoryId: category.id,
+            spendingCategory: category.name,
+            sourceId: source.id,
+            source: source.name,
+            details: details.map((d) => d.toApiPayload()).toList(),
+            createdDate: enteredAt,
+          ));
+      return false;
+    } on ApiUnavailableException {
+      return savePending();
     }
   }
 
@@ -806,6 +873,25 @@ class Repo {
     required Source toSource,
   }) async {
     final enteredAt = _nowGmtPlus7Iso();
+
+    Future<bool> savePending() async {
+      await _queuePending(Transaction(
+        id: _uuid.v4(),
+        type: 'transfer',
+        amount: amount,
+        description: description,
+        fromSource: fromSource.name,
+        toSource: toSource.name,
+        date: enteredAt,
+        syncState: 'pending',
+        updatedAt: _nowIso(),
+      ));
+      return true;
+    }
+
+    // See [createEarning]: offline means queue now, don't wait on a request.
+    if (!SyncService.instance.isOnline) return savePending();
+
     try {
       await _withTokenRefresh(() async {
         final remote = RemoteApi(_cfg);
@@ -847,18 +933,7 @@ class Repo {
       });
       return false;
     } on ApiUnavailableException {
-      await _queuePending(Transaction(
-        id: _uuid.v4(),
-        type: 'transfer',
-        amount: amount,
-        description: description,
-        fromSource: fromSource.name,
-        toSource: toSource.name,
-        date: enteredAt,
-        syncState: 'pending',
-        updatedAt: _nowIso(),
-      ));
-      return true;
+      return savePending();
     }
   }
 
@@ -884,8 +959,8 @@ class Repo {
     await _refreshPendingCount();
   }
 
-  // Wishlist
-  Future<WishlistItem> createWishlistItem({
+  // PlannedExpense
+  Future<PlannedExpenseItem> createPlannedExpenseItem({
     required String itemName,
     required double price,
     required String transactionType,
@@ -896,7 +971,7 @@ class Repo {
     // Stamped once, before the API is even tried, so the item carries the
     // moment it was entered whichever branch it takes.
     final enteredAt = _nowGmtPlus7Iso();
-    final item = WishlistItem(
+    final item = PlannedExpenseItem(
       id: _uuid.v4(),
       itemName: itemName,
       price: price,
@@ -909,30 +984,31 @@ class Repo {
       updatedAt: _nowIso(),
     );
     try {
-      final m = await _withTokenRefresh(() => RemoteApi(_cfg).createWishlist(
-            id: item.id,
-            itemName: itemName,
-            price: price,
-            transactionType: transactionType,
-            categoryId: category.id,
-            categoryName: category.name,
-            notes: notes,
-            priority: priority,
-            createdDate: enteredAt,
-          ));
-      final synced = WishlistItem.fromMap(m);
-      await AppDb.instance.putWishlistItem(synced, _userId);
+      final m =
+          await _withTokenRefresh(() => RemoteApi(_cfg).createPlannedExpense(
+                id: item.id,
+                itemName: itemName,
+                price: price,
+                transactionType: transactionType,
+                categoryId: category.id,
+                categoryName: category.name,
+                notes: notes,
+                priority: priority,
+                createdDate: enteredAt,
+              ));
+      final synced = PlannedExpenseItem.fromMap(m);
+      await AppDb.instance.putPlannedExpenseItem(synced, _userId);
       return synced;
     } on ApiUnavailableException {
       final pending = item.copyWith(syncState: 'pending');
-      await AppDb.instance.putWishlistItem(pending, _userId);
+      await AppDb.instance.putPlannedExpenseItem(pending, _userId);
       await _refreshPendingCount();
       return pending;
     }
   }
 
-  Future<bool> fulfillWishlistItem({
-    required WishlistItem item,
+  Future<bool> fulfillPlannedExpenseItem({
+    required PlannedExpenseItem item,
     required double price,
     required Category category,
     required Source source,
@@ -958,30 +1034,30 @@ class Repo {
       updatedAt: _nowIso(),
       syncState: 'pending',
     );
-    await AppDb.instance.putWishlistItem(updated, _userId);
+    await AppDb.instance.putPlannedExpenseItem(updated, _userId);
     try {
-      await _withTokenRefresh(() => RemoteApi(_cfg).updateWishlistStatus(
+      await _withTokenRefresh(() => RemoteApi(_cfg).updatePlannedExpenseStatus(
             id: item.id,
             status: 'fulfilled',
             fulfilledPrice: price,
             changedAt: fulfilledAt,
           ));
-      await AppDb.instance
-          .putWishlistItem(updated.copyWith(syncState: 'synced'), _userId);
+      await AppDb.instance.putPlannedExpenseItem(
+          updated.copyWith(syncState: 'synced'), _userId);
     } on ApiUnavailableException {
       await _refreshPendingCount();
     }
     return savedLocally;
   }
 
-  Future<bool> partialPayWishlistItem({
-    required WishlistItem item,
+  Future<bool> partialPayPlannedExpenseItem({
+    required PlannedExpenseItem item,
     required double price,
     required Category category,
     required Source source,
   }) async {
     if (price >= item.price) {
-      return fulfillWishlistItem(
+      return fulfillPlannedExpenseItem(
         item: item,
         price: price,
         category: category,
@@ -1007,9 +1083,9 @@ class Repo {
       updatedAt: _nowIso(),
       syncState: 'pending',
     );
-    await AppDb.instance.putWishlistItem(updated, _userId);
+    await AppDb.instance.putPlannedExpenseItem(updated, _userId);
     try {
-      await _withTokenRefresh(() => RemoteApi(_cfg).createWishlist(
+      await _withTokenRefresh(() => RemoteApi(_cfg).createPlannedExpense(
             id: updated.id,
             itemName: updated.itemName,
             price: updated.price,
@@ -1020,15 +1096,15 @@ class Repo {
             priority: updated.priority,
             createdDate: updated.createdDate,
           ));
-      await AppDb.instance
-          .putWishlistItem(updated.copyWith(syncState: 'synced'), _userId);
+      await AppDb.instance.putPlannedExpenseItem(
+          updated.copyWith(syncState: 'synced'), _userId);
     } on ApiUnavailableException {
       await _refreshPendingCount();
     }
     return savedLocally;
   }
 
-  Future<void> cancelWishlistItem(WishlistItem item) async {
+  Future<void> cancelPlannedExpenseItem(PlannedExpenseItem item) async {
     final canceledAt = _nowGmtPlus7Iso();
     final updated = item.copyWith(
       status: 'canceled',
@@ -1036,21 +1112,22 @@ class Repo {
       updatedAt: _nowIso(),
       syncState: 'pending',
     );
-    await AppDb.instance.putWishlistItem(updated, _userId);
+    await AppDb.instance.putPlannedExpenseItem(updated, _userId);
     try {
-      await _withTokenRefresh(() => RemoteApi(_cfg).updateWishlistStatus(
+      await _withTokenRefresh(() => RemoteApi(_cfg).updatePlannedExpenseStatus(
           id: item.id, status: 'canceled', changedAt: canceledAt));
-      await AppDb.instance
-          .putWishlistItem(updated.copyWith(syncState: 'synced'), _userId);
+      await AppDb.instance.putPlannedExpenseItem(
+          updated.copyWith(syncState: 'synced'), _userId);
     } on ApiUnavailableException {
       await _refreshPendingCount();
     }
   }
 
-  Future<void> removeWishlistItem(WishlistItem item) async {
-    await AppDb.instance.deleteWishlistItem(item.id, _userId);
+  Future<void> removePlannedExpenseItem(PlannedExpenseItem item) async {
+    await AppDb.instance.deletePlannedExpenseItem(item.id, _userId);
     try {
-      await _withTokenRefresh(() => RemoteApi(_cfg).deleteWishlist(item.id));
+      await _withTokenRefresh(
+          () => RemoteApi(_cfg).deletePlannedExpense(item.id));
     } on ApiUnavailableException {
       await _refreshPendingCount();
     }
@@ -1098,8 +1175,7 @@ class Repo {
   /// Records the date a unit ran out, or puts it back in use when [outDate] is
   /// empty.
   Future<void> setConsumableOutDate(Consumable unit, String outDate) async {
-    final updated =
-        unit.copyWith(outDate: outDate, updatedAt: _nowIso());
+    final updated = unit.copyWith(outDate: outDate, updatedAt: _nowIso());
     await AppDb.instance
         .putConsumable(updated.copyWith(syncState: 'pending'), _userId);
     try {
@@ -1119,8 +1195,7 @@ class Repo {
   Future<void> removeConsumable(Consumable unit) async {
     await AppDb.instance.deleteConsumable(unit.id, _userId);
     try {
-      await _withTokenRefresh(
-          () => RemoteApi(_cfg).deleteConsumable(unit.id));
+      await _withTokenRefresh(() => RemoteApi(_cfg).deleteConsumable(unit.id));
     } on ApiUnavailableException {
       await AppDb.instance.putPendingDelete(
         PendingDelete(
@@ -1146,6 +1221,84 @@ class Repo {
     } on ApiUnavailableException {
       await AppDb.instance
           .putConsumable(unit.copyWith(syncState: 'pending'), _userId);
+      await _refreshPendingCount();
+    }
+  }
+
+  // ── Planned transactions ────────────────────────────────────────────
+  /// Tags [detail] into a planned transaction bundle - either a brand new one
+  /// named [newBundleName], or the existing bundle [existingBundleId]. Exactly
+  /// one of the two must be given.
+  Future<void> addTransactionDetailToPlannedTransaction({
+    required TransactionDetail detail,
+    String? existingBundleId,
+    String? newBundleName,
+  }) async {
+    assert((newBundleName != null && newBundleName.trim().isNotEmpty) !=
+        (existingBundleId != null && existingBundleId.isNotEmpty));
+
+    String bundleId;
+    if (newBundleName != null && newBundleName.trim().isNotEmpty) {
+      final now = _nowGmtPlus7Iso();
+      final bundle = PlannedTransaction(
+        id: _uuid.v4(),
+        name: newBundleName.trim(),
+        createdDate: now,
+        updatedAt: _nowIso(),
+      );
+      await _savePlannedTransaction(bundle);
+      bundleId = bundle.id;
+    } else {
+      bundleId = existingBundleId!;
+    }
+
+    final now = _nowGmtPlus7Iso();
+    final row = PlannedTransactionDetail(
+      id: _uuid.v4(),
+      plannedTransactionId: bundleId,
+      itemName: detail.itemName,
+      quantity: detail.quantity,
+      unitPrice: detail.unitPrice,
+      amount: detail.lineTotal,
+      note: detail.note,
+      transactionId: detail.transactionId,
+      transactionDetailId: detail.id,
+      createdDate: now,
+    );
+    await _savePlannedTransactionDetail(row);
+  }
+
+  /// Writes one bundle header through to the API, queuing it locally when the
+  /// API is unreachable. `POST /planned-transactions` upserts on the
+  /// client-generated id, so a retry can never duplicate a bundle.
+  Future<void> _savePlannedTransaction(PlannedTransaction bundle) async {
+    try {
+      await _withTokenRefresh(() => RemoteApi(_cfg).createPlannedTransaction(
+            id: bundle.id,
+            name: bundle.name,
+            createdDate: bundle.createdDate,
+          ));
+      await AppDb.instance
+          .putPlannedTransaction(bundle.copyWith(syncState: 'synced'), _userId);
+    } on ApiUnavailableException {
+      await AppDb.instance.putPlannedTransaction(
+          bundle.copyWith(syncState: 'pending'), _userId);
+      await _refreshPendingCount();
+    }
+  }
+
+  /// Writes one tagged item through to the API, mirroring [_savePlannedTransaction].
+  Future<void> _savePlannedTransactionDetail(
+      PlannedTransactionDetail row) async {
+    try {
+      await _withTokenRefresh(() => RemoteApi(_cfg)
+          .createPlannedTransactionDetail(
+              row.plannedTransactionId, row.toApiPayload()));
+      await AppDb.instance.putPlannedTransactionDetail(
+          row.copyWith(syncState: 'synced'), _userId);
+    } on ApiUnavailableException {
+      await AppDb.instance.putPlannedTransactionDetail(
+          row.copyWith(syncState: 'pending'), _userId);
       await _refreshPendingCount();
     }
   }
@@ -1897,9 +2050,9 @@ class Repo {
     final remote = RemoteApi(cfg);
 
     for (final item
-        in await AppDb.instance.getPendingWishlistItems(cfg.userId)) {
+        in await AppDb.instance.getPendingPlannedExpenseItems(cfg.userId)) {
       try {
-        await remote.createWishlist(
+        await remote.createPlannedExpense(
           id: item.id,
           itemName: item.itemName,
           price: item.price,
@@ -1913,7 +2066,7 @@ class Repo {
           createdDate: item.createdDate,
         );
         if (item.status != 'active') {
-          await remote.updateWishlistStatus(
+          await remote.updatePlannedExpenseStatus(
             id: item.id,
             status: item.status,
             fulfilledPrice: item.fulfilledPrice,
@@ -1921,8 +2074,8 @@ class Repo {
                 item.status == 'fulfilled' ? item.fulfilledAt : item.canceledAt,
           );
         }
-        await AppDb.instance
-            .putWishlistItem(item.copyWith(syncState: 'synced'), cfg.userId);
+        await AppDb.instance.putPlannedExpenseItem(
+            item.copyWith(syncState: 'synced'), cfg.userId);
       } on ApiUnavailableException {
         break;
       } catch (_) {
@@ -1992,6 +2145,40 @@ class Repo {
         await remote.createInvestment(item.toApiPayload());
         await AppDb.instance
             .putInvestment(item.copyWith(syncState: 'synced'), cfg.userId);
+      } on ApiUnavailableException {
+        break;
+      } catch (_) {
+        // Keep the pending row for a later retry.
+      }
+    }
+
+    // Planned transaction bundles and their tagged items both upsert on their
+    // client-generated id, so one call each covers what was written offline.
+    // Bundles go first since a detail's id reference stays valid either way,
+    // but this keeps the header visible server-side before its items land.
+    for (final bundle
+        in await AppDb.instance.getPendingPlannedTransactions(cfg.userId)) {
+      try {
+        await remote.createPlannedTransaction(
+          id: bundle.id,
+          name: bundle.name,
+          createdDate: bundle.createdDate,
+        );
+        await AppDb.instance.putPlannedTransaction(
+            bundle.copyWith(syncState: 'synced'), cfg.userId);
+      } on ApiUnavailableException {
+        break;
+      } catch (_) {
+        // Keep the pending row for a later retry.
+      }
+    }
+    for (final row in await AppDb.instance
+        .getPendingPlannedTransactionDetails(cfg.userId)) {
+      try {
+        await remote.createPlannedTransactionDetail(
+            row.plannedTransactionId, row.toApiPayload());
+        await AppDb.instance.putPlannedTransactionDetail(
+            row.copyWith(syncState: 'synced'), cfg.userId);
       } on ApiUnavailableException {
         break;
       } catch (_) {

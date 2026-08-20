@@ -9,11 +9,13 @@ const _userScopedTables = [
   'categories',
   'transactions',
   'transaction_details',
-  'wishlist_items',
+  'planned_expense_items',
   'routine_transactions',
   'routine_payments',
   'consumables',
   'investments',
+  'planned_transactions',
+  'planned_transaction_details',
   'activity_categories',
   'activity_templates',
   'daily_activities',
@@ -39,13 +41,21 @@ class AppDb {
 
   late Database _db;
 
+  bool _initialized = false;
+
+  /// Whether [init] has already run in *this isolate*. The background sync
+  /// worker may execute either on a fresh engine (where it must open the
+  /// database itself) or on the running app's isolate (where it must not),
+  /// and this is how it tells the two apart.
+  bool get isInitialized => _initialized;
+
   Future<void> init(DatabaseFactory factory) async {
     final path =
         join(await factory.getDatabasesPath(), 'personal_dashboard.db');
     _db = await factory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 18,
+        version: 21,
         onCreate: (db, _) async {
           await db.execute('''CREATE TABLE sources (
             id TEXT NOT NULL,
@@ -83,7 +93,8 @@ class AppDb {
           await _createTransactionDetailsTable(db);
           await _createConsumablesTable(db);
           await _createInvestmentsTable(db);
-          await db.execute('''CREATE TABLE wishlist_items (
+          await _createPlannedTransactionTables(db);
+          await db.execute('''CREATE TABLE planned_expense_items (
             id TEXT NOT NULL,
             itemName TEXT NOT NULL,
             price REAL NOT NULL,
@@ -132,6 +143,7 @@ class AppDb {
             PRIMARY KEY (id, userId)
           )''');
           await _createActivityTables(db);
+          await _createRoutineReminderTable(db);
           await db.execute('''CREATE TABLE meta (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -287,9 +299,26 @@ class AppDb {
           if (oldVersion < 18) {
             await _createInvestmentsTable(db);
           }
+          if (oldVersion < 19) {
+            // Renamed in place (rather than dropped and recreated) so any
+            // items still queued offline survive the rename.
+            final exists = await db.query('sqlite_master',
+                where: "type = 'table' AND name = 'wishlist_items'");
+            if (exists.isNotEmpty) {
+              await db
+                  .execute('ALTER TABLE wishlist_items RENAME TO planned_expense_items');
+            }
+          }
+          if (oldVersion < 20) {
+            await _createPlannedTransactionTables(db);
+          }
+          if (oldVersion < 21) {
+            await _createRoutineReminderTable(db);
+          }
         },
       ),
     );
+    _initialized = true;
   }
 
   // ── Sources ────────────────────────────────────────────────────────
@@ -487,28 +516,31 @@ class AppDb {
   Future<void> _ensurePendingDeletesTable() => _createPendingDeletesTable(_db);
 
   // ── Meta ───────────────────────────────────────────────────────────
-  // Wishlist
-  Future<List<WishlistItem>> getWishlistItems(String userId) async {
-    final rows = await _db.query('wishlist_items',
+  // Planned expenses
+  Future<List<PlannedExpenseItem>> getPlannedExpenseItems(String userId) async {
+    final rows = await _db.query('planned_expense_items',
         where: 'userId = ?', whereArgs: [userId], orderBy: 'updatedAt DESC');
-    return rows.map(WishlistItem.fromMap).toList();
+    return rows.map(PlannedExpenseItem.fromMap).toList();
   }
 
-  Future<List<WishlistItem>> getPendingWishlistItems(String userId) async {
-    final rows = await _db.query('wishlist_items',
+  Future<List<PlannedExpenseItem>> getPendingPlannedExpenseItems(
+      String userId) async {
+    final rows = await _db.query('planned_expense_items',
         where: "userId = ? AND syncState = 'pending'",
         whereArgs: [userId],
         orderBy: 'updatedAt ASC');
-    return rows.map(WishlistItem.fromMap).toList();
+    return rows.map(PlannedExpenseItem.fromMap).toList();
   }
 
-  Future<void> putWishlistItem(WishlistItem item, String userId) async {
-    await _db.insert('wishlist_items', {...item.toMap(), 'userId': userId},
+  Future<void> putPlannedExpenseItem(
+      PlannedExpenseItem item, String userId) async {
+    await _db.insert(
+        'planned_expense_items', {...item.toMap(), 'userId': userId},
         conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
-  Future<void> deleteWishlistItem(String id, String userId) async {
-    await _db.delete('wishlist_items',
+  Future<void> deletePlannedExpenseItem(String id, String userId) async {
+    await _db.delete('planned_expense_items',
         where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
   }
 
@@ -535,6 +567,51 @@ class AppDb {
   Future<void> deleteConsumable(String id, String userId) async {
     await _db.delete('consumables',
         where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
+  }
+
+  // ── Planned transactions ──────────────────────────────────────────
+  Future<List<PlannedTransaction>> getPlannedTransactions(String userId) async {
+    final rows = await _db.query('planned_transactions',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'updatedAt DESC');
+    return rows.map(PlannedTransaction.fromMap).toList();
+  }
+
+  Future<List<PlannedTransaction>> getPendingPlannedTransactions(
+      String userId) async {
+    final rows = await _db.query('planned_transactions',
+        where: "userId = ? AND syncState = 'pending'",
+        whereArgs: [userId],
+        orderBy: 'updatedAt ASC');
+    return rows.map(PlannedTransaction.fromMap).toList();
+  }
+
+  Future<void> putPlannedTransaction(
+      PlannedTransaction item, String userId) async {
+    await _db.insert('planned_transactions', {...item.toMap(), 'userId': userId},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<PlannedTransactionDetail>> getPlannedTransactionDetails(
+      String userId) async {
+    final rows = await _db.query('planned_transaction_details',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'createdDate ASC');
+    return rows.map(PlannedTransactionDetail.fromMap).toList();
+  }
+
+  Future<List<PlannedTransactionDetail>> getPendingPlannedTransactionDetails(
+      String userId) async {
+    final rows = await _db.query('planned_transaction_details',
+        where: "userId = ? AND syncState = 'pending'",
+        whereArgs: [userId],
+        orderBy: 'createdDate ASC');
+    return rows.map(PlannedTransactionDetail.fromMap).toList();
+  }
+
+  Future<void> putPlannedTransactionDetail(
+      PlannedTransactionDetail item, String userId) async {
+    await _db.insert(
+        'planned_transaction_details', {...item.toMap(), 'userId': userId},
+        conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   // ── Investments ────────────────────────────────────────────────────
@@ -588,6 +665,34 @@ class AppDb {
   Future<void> deleteRoutineTransaction(String id, String userId) async {
     await _db.delete('routine_transactions',
         where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
+    await _db.delete('routine_reminders',
+        where: 'routineId = ? AND userId = ?', whereArgs: [id, userId]);
+  }
+
+  /// Ids of routines the user has muted. Reminders are opt-out per routine,
+  /// so only the exceptions are stored and an unknown routine is reminded
+  /// about. This table is deliberately local: transaction-api has no column
+  /// for it, and a mute is a per-device preference rather than shared data.
+  Future<Set<String>> getMutedRoutineIds(String userId) async {
+    final rows = await _db.query('routine_reminders',
+        columns: ['routineId'],
+        where: 'userId = ? AND muted = 1',
+        whereArgs: [userId]);
+    return rows.map((row) => row['routineId'] as String).toSet();
+  }
+
+  Future<void> setRoutineReminderMuted(
+      String routineId, String userId, bool muted) async {
+    if (!muted) {
+      await _db.delete('routine_reminders',
+          where: 'routineId = ? AND userId = ?', whereArgs: [routineId, userId]);
+      return;
+    }
+    await _db.insert(
+      'routine_reminders',
+      {'routineId': routineId, 'userId': userId, 'muted': 1},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 
   Future<List<RoutinePayment>> getRoutinePayments(String userId) async {
@@ -854,13 +959,14 @@ class AppDb {
     });
   }
 
-  Future<void> replaceWishlistItems(
-      List<WishlistItem> items, String userId) async {
+  Future<void> replacePlannedExpenseItems(
+      List<PlannedExpenseItem> items, String userId) async {
     await _db.transaction((txn) async {
-      await txn.delete('wishlist_items',
+      await txn.delete('planned_expense_items',
           where: "userId = ? AND syncState != 'pending'", whereArgs: [userId]);
       for (final item in items) {
-        await txn.insert('wishlist_items', {...item.toMap(), 'userId': userId},
+        await txn.insert(
+            'planned_expense_items', {...item.toMap(), 'userId': userId},
             conflictAlgorithm: ConflictAlgorithm.replace);
       }
     });
@@ -885,6 +991,32 @@ class AppDb {
           where: "userId = ? AND syncState != 'pending'", whereArgs: [userId]);
       for (final item in items) {
         await txn.insert('investments', {...item.toMap(), 'userId': userId},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
+  Future<void> replacePlannedTransactions(
+      List<PlannedTransaction> items, String userId) async {
+    await _db.transaction((txn) async {
+      await txn.delete('planned_transactions',
+          where: "userId = ? AND syncState != 'pending'", whereArgs: [userId]);
+      for (final item in items) {
+        await txn.insert(
+            'planned_transactions', {...item.toMap(), 'userId': userId},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
+  Future<void> replacePlannedTransactionDetails(
+      List<PlannedTransactionDetail> items, String userId) async {
+    await _db.transaction((txn) async {
+      await txn.delete('planned_transaction_details',
+          where: "userId = ? AND syncState != 'pending'", whereArgs: [userId]);
+      for (final item in items) {
+        await txn.insert('planned_transaction_details',
+            {...item.toMap(), 'userId': userId},
             conflictAlgorithm: ConflictAlgorithm.replace);
       }
     });
@@ -977,11 +1109,13 @@ class AppDb {
       getPendingCategories(userId),
       getPendingActivityCategories(userId),
       getPendingTransactions(userId),
-      getPendingWishlistItems(userId),
+      getPendingPlannedExpenseItems(userId),
       getPendingRoutineTransactions(userId),
       getPendingRoutinePayments(userId),
       getPendingConsumables(userId),
       getPendingInvestments(userId),
+      getPendingPlannedTransactions(userId),
+      getPendingPlannedTransactionDetails(userId),
       getPendingDeletes(userId),
       getPendingInsulinItems(userId),
       getPendingInsulinAssigns(userId),
@@ -1238,6 +1372,37 @@ Future<void> _createConsumablesTable(Database db) async {
     ON consumables (transactionId, userId)''');
 }
 
+/// Named bundles built up from real purchases, and the items tagged into
+/// them. See [PlannedTransaction] / [PlannedTransactionDetail].
+Future<void> _createPlannedTransactionTables(Database db) async {
+  await db.execute('''CREATE TABLE IF NOT EXISTS planned_transactions (
+    id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    createdDate TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    syncState TEXT DEFAULT 'synced',
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, userId)
+  )''');
+  await db.execute('''CREATE TABLE IF NOT EXISTS planned_transaction_details (
+    id TEXT NOT NULL,
+    plannedTransactionId TEXT NOT NULL,
+    itemName TEXT NOT NULL,
+    quantity REAL NOT NULL DEFAULT 1,
+    unitPrice REAL NOT NULL DEFAULT 0,
+    amount REAL NOT NULL DEFAULT 0,
+    note TEXT DEFAULT '',
+    transactionId TEXT DEFAULT '',
+    transactionDetailId TEXT DEFAULT '',
+    createdDate TEXT NOT NULL,
+    syncState TEXT DEFAULT 'synced',
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, userId)
+  )''');
+  await db.execute('''CREATE INDEX IF NOT EXISTS idx_planned_transaction_details_parent
+    ON planned_transaction_details (plannedTransactionId, userId)''');
+}
+
 /// Investment holdings - reksa dana positions and quantities of gold/silver.
 /// `lastUnitPrice` is cached here rather than fetched on read so the page still
 /// shows a value with no network, and `priceUpdatedAt` says how stale it is.
@@ -1272,6 +1437,16 @@ Future<void> _createPendingDeletesTable(Database db) async {
     updatedAt TEXT NOT NULL,
     userId TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (id, resource, userId)
+  )''');
+}
+
+/// Per-routine reminder mutes. Local-only - see [AppDb.getMutedRoutineIds].
+Future<void> _createRoutineReminderTable(Database db) async {
+  await db.execute('''CREATE TABLE IF NOT EXISTS routine_reminders (
+    routineId TEXT NOT NULL,
+    userId TEXT NOT NULL DEFAULT '',
+    muted INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (routineId, userId)
   )''');
 }
 

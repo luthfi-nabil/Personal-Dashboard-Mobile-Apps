@@ -41,7 +41,7 @@ class _PendingSyncScreenState extends ConsumerState<PendingSyncScreen> {
   }
 
   Future<void> _syncNow() async {
-    await ref.read(appDataProvider.notifier).refresh();
+    await ref.read(appDataProvider.notifier).refresh(force: true);
     if (!mounted) return;
     _reload();
     final failed = ref.read(appDataProvider).hasError ||
@@ -186,7 +186,7 @@ Future<List<_PendingSyncItem>> _loadPendingItems(String userId) async {
     AppDb.instance.getPendingCategories(userId),
     AppDb.instance.getPendingActivityCategories(userId),
     AppDb.instance.getPendingTransactions(userId),
-    AppDb.instance.getPendingWishlistItems(userId),
+    AppDb.instance.getPendingPlannedExpenseItems(userId),
     AppDb.instance.getPendingRoutineTransactions(userId),
     AppDb.instance.getPendingRoutinePayments(userId),
     AppDb.instance.getPendingInsulinItems(userId),
@@ -228,7 +228,7 @@ Future<List<_PendingSyncItem>> _loadPendingItems(String userId) async {
         icon: Icons.fact_check_outlined,
       ),
     for (final item in results[3] as List<Transaction>) _transactionItem(item),
-    for (final item in results[4] as List<WishlistItem>)
+    for (final item in results[4] as List<PlannedExpenseItem>)
       _PendingSyncItem(
         group: 'Planning',
         title: item.itemName,
