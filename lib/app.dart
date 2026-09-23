@@ -18,6 +18,9 @@ import 'screens/options_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/activities_screen.dart';
 import 'screens/consumables_screen.dart';
+import 'screens/group_balance_screen.dart';
+import 'screens/group_plans_screen.dart';
+import 'screens/group_spendings_screen.dart';
 import 'screens/planned_expense_screen.dart';
 import 'screens/routine_transaction_screen.dart';
 import 'screens/insulin_shell.dart';
@@ -91,6 +94,9 @@ final _router = GoRouter(
         GoRoute(
             path: '/routine-transactions',
             builder: (c, s) => const RoutineTransactionScreen()),
+        GoRoute(
+            path: '/group-spendings',
+            builder: (c, s) => const GroupSpendingsScreen()),
         GoRoute(path: '/settings', builder: (c, s) => const SettingsScreen()),
         GoRoute(path: '/api-log', builder: (c, s) => const ApiLogScreen()),
         GoRoute(
@@ -161,6 +167,22 @@ final _router = GoRouter(
       parentNavigatorKey: _rootKey,
       path: '/add/:id',
       builder: (c, s) => AddTransactionScreen(editId: s.pathParameters['id']),
+    ),
+    GoRoute(
+      parentNavigatorKey: _rootKey,
+      path: '/group-spendings/:id',
+      builder: (c, s) =>
+          GroupSpendingDetailScreen(groupId: s.pathParameters['id']!),
+    ),
+    GoRoute(
+      parentNavigatorKey: _rootKey,
+      path: '/group-spendings/:id/plans',
+      builder: (c, s) => GroupPlansScreen(groupId: s.pathParameters['id']!),
+    ),
+    GoRoute(
+      parentNavigatorKey: _rootKey,
+      path: '/group-spendings/:id/balance',
+      builder: (c, s) => GroupBalanceScreen(groupId: s.pathParameters['id']!),
     ),
     GoRoute(
       parentNavigatorKey: _rootKey,

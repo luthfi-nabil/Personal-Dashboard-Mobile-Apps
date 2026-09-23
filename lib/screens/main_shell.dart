@@ -5,6 +5,7 @@ import '../theme/app_theme.dart';
 import '../providers/providers.dart';
 import '../core/sync.dart';
 import '../widgets/app_menu_drawer.dart';
+import '../widgets/app_update_widgets.dart';
 
 class MainShell extends ConsumerWidget {
   final Widget child;
@@ -44,6 +45,7 @@ class MainShell extends ConsumerWidget {
             c: c,
             onRefresh: () => refreshNow(context, ref),
           ),
+          const AppUpdateBanner(),
           Expanded(child: child),
         ],
       ),

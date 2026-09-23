@@ -16,6 +16,10 @@ const _userScopedTables = [
   'investments',
   'planned_transactions',
   'planned_transaction_details',
+  'spending_groups',
+  'spending_group_members',
+  'spending_group_status',
+  'group_transactions',
   'activity_categories',
   'activity_templates',
   'daily_activities',
@@ -55,7 +59,7 @@ class AppDb {
     _db = await factory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 21,
+        version: 22,
         onCreate: (db, _) async {
           await db.execute('''CREATE TABLE sources (
             id TEXT NOT NULL,
@@ -87,10 +91,12 @@ class AppDb {
             date TEXT NOT NULL,
             syncState TEXT DEFAULT 'pending',
             updatedAt TEXT NOT NULL,
+            groupId TEXT,
             userId TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (id, userId)
           )''');
           await _createTransactionDetailsTable(db);
+          await _createGroupTables(db);
           await _createConsumablesTable(db);
           await _createInvestmentsTable(db);
           await _createPlannedTransactionTables(db);
@@ -314,6 +320,10 @@ class AppDb {
           }
           if (oldVersion < 21) {
             await _createRoutineReminderTable(db);
+          }
+          if (oldVersion < 22) {
+            await _addColumnIfMissing(db, 'transactions', 'groupId TEXT');
+            await _createGroupTables(db);
           }
         },
       ),
@@ -612,6 +622,147 @@ class AppDb {
     await _db.insert(
         'planned_transaction_details', {...item.toMap(), 'userId': userId},
         conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  // ── Spending groups ────────────────────────────────────────────────
+  Future<List<SpendingGroup>> getSpendingGroups(String userId) async {
+    final rows = await _db.query('spending_groups',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'createdDate ASC');
+    return rows.map(SpendingGroup.fromMap).toList();
+  }
+
+  Future<List<SpendingGroup>> getPendingSpendingGroups(String userId) async {
+    final rows = await _db.query('spending_groups',
+        where: "userId = ? AND syncState = 'pending'",
+        whereArgs: [userId],
+        orderBy: 'createdDate ASC');
+    return rows.map(SpendingGroup.fromMap).toList();
+  }
+
+  Future<void> putSpendingGroup(SpendingGroup item, String userId) async {
+    await _db.insert('spending_groups', {...item.toMap(), 'userId': userId},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<GroupMember>> getGroupMembers(String userId) async {
+    final rows = await _db.query('spending_group_members',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'addedDate ASC');
+    return rows.map(GroupMember.fromMap).toList();
+  }
+
+  Future<List<GroupMember>> getPendingGroupMembers(String userId) async {
+    final rows = await _db.query('spending_group_members',
+        where: "userId = ? AND syncState = 'pending'",
+        whereArgs: [userId],
+        orderBy: 'addedDate ASC');
+    return rows.map(GroupMember.fromMap).toList();
+  }
+
+  Future<void> putGroupMember(GroupMember item, String userId) async {
+    await _db.insert(
+        'spending_group_members', {...item.toMap(), 'userId': userId},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<GroupStatusChange>> getGroupStatusChanges(String userId) async {
+    final rows = await _db.query('spending_group_status',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'changedAt ASC');
+    return rows.map(GroupStatusChange.fromMap).toList();
+  }
+
+  Future<List<GroupStatusChange>> getPendingGroupStatusChanges(
+      String userId) async {
+    final rows = await _db.query('spending_group_status',
+        where: "userId = ? AND syncState = 'pending'",
+        whereArgs: [userId],
+        orderBy: 'changedAt ASC');
+    return rows.map(GroupStatusChange.fromMap).toList();
+  }
+
+  Future<void> putGroupStatusChange(
+      GroupStatusChange item, String userId) async {
+    await _db.insert(
+        'spending_group_status', {...item.toMap(), 'userId': userId},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  /// Drops a group and everything cached under it. Used to undo a create the
+  /// server rejected.
+  Future<void> deleteSpendingGroup(String id, String userId) async {
+    await _db.transaction((txn) async {
+      await txn.delete('spending_groups',
+          where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
+      for (final table in [
+        'spending_group_members',
+        'spending_group_status',
+        'group_transactions',
+      ]) {
+        await txn.delete(table,
+            where: 'groupId = ? AND userId = ?', whereArgs: [id, userId]);
+      }
+    });
+  }
+
+  Future<void> deleteGroupMember(
+      String groupId, String username, String userId) async {
+    await _db.delete('spending_group_members',
+        where: 'groupId = ? AND username = ? AND userId = ?',
+        whereArgs: [groupId, username, userId]);
+  }
+
+  Future<void> deleteGroupStatusChange(String id, String userId) async {
+    await _db.delete('spending_group_status',
+        where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
+  }
+
+  Future<List<GroupTransaction>> getGroupTransactions(String userId) async {
+    final rows = await _db.query('group_transactions',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'date DESC');
+    return rows.map(GroupTransaction.fromMap).toList();
+  }
+
+  Future<void> replaceSpendingGroups(
+          List<SpendingGroup> items, String userId) =>
+      _replaceKeepingPending(
+          'spending_groups', items.map((i) => i.toMap()), userId);
+
+  Future<void> replaceGroupMembers(List<GroupMember> items, String userId) =>
+      _replaceKeepingPending(
+          'spending_group_members', items.map((i) => i.toMap()), userId);
+
+  Future<void> replaceGroupStatusChanges(
+          List<GroupStatusChange> items, String userId) =>
+      _replaceKeepingPending(
+          'spending_group_status', items.map((i) => i.toMap()), userId);
+
+  /// Other members' rows only ever come from the server, so this is a plain
+  /// snapshot swap; the user's own queued rows live in `transactions`.
+  Future<void> replaceGroupTransactions(
+      List<GroupTransaction> items, String userId) async {
+    await _db.transaction((txn) async {
+      await txn.delete('group_transactions',
+          where: 'userId = ?', whereArgs: [userId]);
+      for (final item in items) {
+        await txn.insert(
+            'group_transactions', {...item.toMap(), 'userId': userId},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
+  /// Swaps in the server's rows for [table] without touching rows still
+  /// queued locally (`syncState = 'pending'`); a queued row also wins over
+  /// the server's copy of itself.
+  Future<void> _replaceKeepingPending(String table,
+      Iterable<Map<String, dynamic>> rows, String userId) async {
+    await _db.transaction((txn) async {
+      await txn.delete(table,
+          where: "userId = ? AND syncState != 'pending'", whereArgs: [userId]);
+      for (final row in rows) {
+        await txn.insert(table, {...row, 'userId': userId},
+            conflictAlgorithm: ConflictAlgorithm.ignore);
+      }
+    });
   }
 
   // ── Investments ────────────────────────────────────────────────────
@@ -1116,6 +1267,9 @@ class AppDb {
       getPendingInvestments(userId),
       getPendingPlannedTransactions(userId),
       getPendingPlannedTransactionDetails(userId),
+      getPendingSpendingGroups(userId),
+      getPendingGroupMembers(userId),
+      getPendingGroupStatusChanges(userId),
       getPendingDeletes(userId),
       getPendingInsulinItems(userId),
       getPendingInsulinAssigns(userId),
@@ -1401,6 +1555,53 @@ Future<void> _createPlannedTransactionTables(Database db) async {
   )''');
   await db.execute('''CREATE INDEX IF NOT EXISTS idx_planned_transaction_details_parent
     ON planned_transaction_details (plannedTransactionId, userId)''');
+}
+
+/// Spending groups, their members, their on/off history and the cached
+/// server copy of every member's tagged transactions. See [SpendingGroup].
+Future<void> _createGroupTables(Database db) async {
+  await db.execute('''CREATE TABLE IF NOT EXISTS spending_groups (
+    id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    leader TEXT NOT NULL DEFAULT '',
+    createdDate TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    syncState TEXT DEFAULT 'synced',
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, userId)
+  )''');
+  await db.execute('''CREATE TABLE IF NOT EXISTS spending_group_members (
+    groupId TEXT NOT NULL,
+    username TEXT NOT NULL,
+    addedBy TEXT DEFAULT '',
+    addedDate TEXT NOT NULL,
+    syncState TEXT DEFAULT 'synced',
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (groupId, username, userId)
+  )''');
+  await db.execute('''CREATE TABLE IF NOT EXISTS spending_group_status (
+    id TEXT NOT NULL,
+    groupId TEXT NOT NULL,
+    isActive INTEGER NOT NULL DEFAULT 1,
+    changedBy TEXT DEFAULT '',
+    changedAt TEXT NOT NULL,
+    syncState TEXT DEFAULT 'synced',
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, userId)
+  )''');
+  await db.execute('''CREATE TABLE IF NOT EXISTS group_transactions (
+    groupId TEXT NOT NULL,
+    transactionType TEXT NOT NULL,
+    transactionId TEXT NOT NULL,
+    amount REAL NOT NULL DEFAULT 0,
+    description TEXT DEFAULT '',
+    category TEXT DEFAULT '',
+    date TEXT NOT NULL,
+    createdBy TEXT DEFAULT '',
+    syncState TEXT DEFAULT 'synced',
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (transactionType, transactionId, userId)
+  )''');
 }
 
 /// Investment holdings - reksa dana positions and quantities of gold/silver.

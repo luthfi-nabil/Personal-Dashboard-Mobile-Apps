@@ -151,6 +151,10 @@ class Transaction {
   final String syncState;
   final String updatedAt;
 
+  /// Spending group this transaction is tagged into, or null. Only spendings
+  /// and earnings can be tagged; the transaction stays personal either way.
+  final String? groupId;
+
   const Transaction({
     required this.id,
     required this.type,
@@ -163,6 +167,7 @@ class Transaction {
     required this.date,
     this.syncState = 'pending',
     required this.updatedAt,
+    this.groupId,
   });
 
   factory Transaction.fromMap(Map<String, dynamic> m) => Transaction(
@@ -177,6 +182,7 @@ class Transaction {
         date: m['date'] as String,
         syncState: m['syncState'] as String? ?? 'pending',
         updatedAt: m['updatedAt'] as String,
+        groupId: m['groupId'] as String?,
       );
 
   Map<String, dynamic> toMap() => {
@@ -191,6 +197,7 @@ class Transaction {
         'date': date,
         'syncState': syncState,
         'updatedAt': updatedAt,
+        'groupId': groupId,
       };
 
   Transaction copyWith({
@@ -205,6 +212,7 @@ class Transaction {
     String? date,
     String? syncState,
     String? updatedAt,
+    String? groupId,
   }) =>
       Transaction(
         id: id ?? this.id,
@@ -218,6 +226,7 @@ class Transaction {
         date: date ?? this.date,
         syncState: syncState ?? this.syncState,
         updatedAt: updatedAt ?? this.updatedAt,
+        groupId: groupId ?? this.groupId,
       );
 }
 
@@ -692,6 +701,247 @@ class PlannedTransactionDetail {
       );
 }
 
+/// A shared ledger several users tag their own spendings/earnings into, so
+/// the group can see one recap. Tagging never moves a transaction: it stays in
+/// the member's personal records, flagged with [Transaction.groupId]. Maps
+/// onto transaction-api's `spending_group` table.
+///
+/// Whether the group is on is not stored here but derived from its
+/// [GroupStatusChange] history - see [AppData.isGroupActive].
+class SpendingGroup {
+  final String id;
+  final String name;
+
+  /// Username of the creator. Only the leader can switch the group on/off.
+  final String leader;
+  final String createdDate;
+  final String updatedAt;
+  final String syncState;
+
+  const SpendingGroup({
+    required this.id,
+    required this.name,
+    required this.leader,
+    required this.createdDate,
+    required this.updatedAt,
+    this.syncState = 'synced',
+  });
+
+  factory SpendingGroup.fromMap(Map<String, dynamic> m) => SpendingGroup(
+        id: m['id'] as String,
+        name: m['name'] as String,
+        leader: m['leader'] as String? ?? '',
+        createdDate: m['createdDate'] as String,
+        updatedAt: m['updatedAt'] as String,
+        syncState: m['syncState'] as String? ?? 'synced',
+      );
+
+  factory SpendingGroup.fromApi(Map<String, dynamic> m) => SpendingGroup(
+        id: m['group_id'] as String,
+        name: m['group_name'] as String? ?? '',
+        leader: m['leader'] as String? ?? '',
+        createdDate: (m['created_date'] ?? '').toString(),
+        updatedAt: (m['updated_date'] ?? m['created_date'] ?? '').toString(),
+        syncState: 'synced',
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'name': name,
+        'leader': leader,
+        'createdDate': createdDate,
+        'updatedAt': updatedAt,
+        'syncState': syncState,
+      };
+
+  SpendingGroup copyWith({String? name, String? updatedAt, String? syncState}) =>
+      SpendingGroup(
+        id: id,
+        name: name ?? this.name,
+        leader: leader,
+        createdDate: createdDate,
+        updatedAt: updatedAt ?? this.updatedAt,
+        syncState: syncState ?? this.syncState,
+      );
+}
+
+/// One user in a [SpendingGroup]. Maps onto `spending_group_member`.
+class GroupMember {
+  final String groupId;
+  final String username;
+  final String addedBy;
+  final String addedDate;
+  final String syncState;
+
+  const GroupMember({
+    required this.groupId,
+    required this.username,
+    required this.addedBy,
+    required this.addedDate,
+    this.syncState = 'synced',
+  });
+
+  factory GroupMember.fromMap(Map<String, dynamic> m) => GroupMember(
+        groupId: m['groupId'] as String,
+        username: m['username'] as String,
+        addedBy: m['addedBy'] as String? ?? '',
+        addedDate: m['addedDate'] as String? ?? '',
+        syncState: m['syncState'] as String? ?? 'synced',
+      );
+
+  factory GroupMember.fromApi(Map<String, dynamic> m) => GroupMember(
+        groupId: m['group_id'] as String,
+        username: m['username'] as String? ?? '',
+        addedBy: m['added_by'] as String? ?? '',
+        addedDate: (m['added_date'] ?? '').toString(),
+        syncState: 'synced',
+      );
+
+  Map<String, dynamic> toMap() => {
+        'groupId': groupId,
+        'username': username,
+        'addedBy': addedBy,
+        'addedDate': addedDate,
+        'syncState': syncState,
+      };
+
+  GroupMember copyWith({String? syncState}) => GroupMember(
+        groupId: groupId,
+        username: username,
+        addedBy: addedBy,
+        addedDate: addedDate,
+        syncState: syncState ?? this.syncState,
+      );
+}
+
+/// One flip of a group's on/off switch. Kept as history - not a single flag -
+/// so a transaction that reaches the server late (it was entered offline) is
+/// still judged against the state the group was in when it happened. Maps onto
+/// `spending_group_status`.
+class GroupStatusChange {
+  final String id;
+  final String groupId;
+  final bool isActive;
+  final String changedBy;
+
+  /// When the leader flipped the switch on their device (GMT+7, like
+  /// transaction dates), not when the change reached the server.
+  final String changedAt;
+  final String syncState;
+
+  const GroupStatusChange({
+    required this.id,
+    required this.groupId,
+    required this.isActive,
+    required this.changedBy,
+    required this.changedAt,
+    this.syncState = 'synced',
+  });
+
+  factory GroupStatusChange.fromMap(Map<String, dynamic> m) =>
+      GroupStatusChange(
+        id: m['id'] as String,
+        groupId: m['groupId'] as String,
+        isActive: (m['isActive'] as int? ?? 1) == 1,
+        changedBy: m['changedBy'] as String? ?? '',
+        changedAt: m['changedAt'] as String,
+        syncState: m['syncState'] as String? ?? 'synced',
+      );
+
+  factory GroupStatusChange.fromApi(Map<String, dynamic> m) =>
+      GroupStatusChange(
+        id: m['status_id'] as String,
+        groupId: m['group_id'] as String,
+        isActive: m['is_active'] == true || m['is_active'] == 1,
+        changedBy: m['changed_by'] as String? ?? '',
+        changedAt: (m['changed_at'] ?? '').toString(),
+        syncState: 'synced',
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'groupId': groupId,
+        'isActive': isActive ? 1 : 0,
+        'changedBy': changedBy,
+        'changedAt': changedAt,
+        'syncState': syncState,
+      };
+
+  GroupStatusChange copyWith({String? syncState}) => GroupStatusChange(
+        id: id,
+        groupId: groupId,
+        isActive: isActive,
+        changedBy: changedBy,
+        changedAt: changedAt,
+        syncState: syncState ?? this.syncState,
+      );
+}
+
+/// A member's spending or earning as seen from a group's recap. Other
+/// members' rows come only from the server; the signed-in user's own rows that
+/// are still queued offline are added on top by [AppData.groupTransactionsFor].
+class GroupTransaction {
+  final String groupId;
+
+  /// `spending` or `earning`.
+  final String transactionType;
+  final String transactionId;
+  final double amount;
+  final String description;
+  final String category;
+  final String date;
+  final String createdBy;
+  final String syncState;
+
+  const GroupTransaction({
+    required this.groupId,
+    required this.transactionType,
+    required this.transactionId,
+    required this.amount,
+    this.description = '',
+    this.category = '',
+    required this.date,
+    required this.createdBy,
+    this.syncState = 'synced',
+  });
+
+  factory GroupTransaction.fromMap(Map<String, dynamic> m) => GroupTransaction(
+        groupId: m['groupId'] as String,
+        transactionType: m['transactionType'] as String,
+        transactionId: m['transactionId'] as String,
+        amount: (m['amount'] as num).toDouble(),
+        description: m['description'] as String? ?? '',
+        category: m['category'] as String? ?? '',
+        date: m['date'] as String,
+        createdBy: m['createdBy'] as String? ?? '',
+        syncState: m['syncState'] as String? ?? 'synced',
+      );
+
+  factory GroupTransaction.fromApi(Map<String, dynamic> m) => GroupTransaction(
+        groupId: m['group_id'] as String,
+        transactionType: m['transaction_type'] as String? ?? 'spending',
+        transactionId: m['transaction_id'] as String,
+        amount: (m['total_amount'] as num? ?? 0).toDouble(),
+        description: m['description'] as String? ?? '',
+        category: m['category'] as String? ?? '',
+        date: (m['created_date'] ?? '').toString(),
+        createdBy: m['created_by'] as String? ?? '',
+        syncState: 'synced',
+      );
+
+  Map<String, dynamic> toMap() => {
+        'groupId': groupId,
+        'transactionType': transactionType,
+        'transactionId': transactionId,
+        'amount': amount,
+        'description': description,
+        'category': category,
+        'date': date,
+        'createdBy': createdBy,
+        'syncState': syncState,
+      };
+}
+
 /// What a holding on the Investment page actually is. The string values are
 /// the `kind` column in transaction-api's `investment` table — never rename
 /// one without a migration, since rows carry it verbatim.
@@ -1120,6 +1370,16 @@ class AppData {
 
   /// Items tagged into a [PlannedTransaction]. See [PlannedTransactionDetail].
   final List<PlannedTransactionDetail> plannedTransactionDetails;
+
+  /// Spending groups the user belongs to. See [SpendingGroup].
+  final List<SpendingGroup> spendingGroups;
+  final List<GroupMember> groupMembers;
+
+  /// Every on/off switch of every group, in no particular order.
+  final List<GroupStatusChange> groupStatusChanges;
+
+  /// Every member's tagged transactions, as last fetched from the server.
+  final List<GroupTransaction> groupTransactions;
   final List<InsulinItem> insulinItems;
   final List<InsulinAssign> insulinAssigns;
   final List<InsulinUsage> insulinUsages;
@@ -1137,6 +1397,10 @@ class AppData {
     this.investments = const [],
     this.plannedTransactions = const [],
     this.plannedTransactionDetails = const [],
+    this.spendingGroups = const [],
+    this.groupMembers = const [],
+    this.groupStatusChanges = const [],
+    this.groupTransactions = const [],
     this.insulinItems = const [],
     this.insulinAssigns = const [],
     this.insulinUsages = const [],
@@ -1155,7 +1419,103 @@ class AppData {
       plannedTransactionDetails
           .where((d) => d.plannedTransactionId == plannedTransactionId)
           .toList();
+
+  /// This data with the spending-group lists swapped for the given ones.
+  AppData withGroups({
+    required List<SpendingGroup> spendingGroups,
+    required List<GroupMember> groupMembers,
+    required List<GroupStatusChange> groupStatusChanges,
+    required List<GroupTransaction> groupTransactions,
+  }) =>
+      AppData(
+        sources: sources,
+        categories: categories,
+        transactions: transactions,
+        transactionDetails: transactionDetails,
+        plannedExpenseItems: plannedExpenseItems,
+        routineTransactions: routineTransactions,
+        routinePayments: routinePayments,
+        consumables: consumables,
+        investments: investments,
+        plannedTransactions: plannedTransactions,
+        plannedTransactionDetails: plannedTransactionDetails,
+        spendingGroups: spendingGroups,
+        groupMembers: groupMembers,
+        groupStatusChanges: groupStatusChanges,
+        groupTransactions: groupTransactions,
+        insulinItems: insulinItems,
+        insulinAssigns: insulinAssigns,
+        insulinUsages: insulinUsages,
+        bloodSugarLogs: bloodSugarLogs,
+      );
+
+  SpendingGroup? groupById(String? id) =>
+      id == null ? null : spendingGroups.where((g) => g.id == id).firstOrNull;
+
+  List<GroupMember> membersOf(String groupId) =>
+      groupMembers.where((m) => m.groupId == groupId).toList()
+        ..sort((a, b) => a.addedDate.compareTo(b.addedDate));
+
+  /// Whether [groupId] was switched on at [at] (or right now when [at] is
+  /// null). The latest switch at or before that moment wins; a group nobody
+  /// has switched yet is on.
+  bool isGroupActive(String groupId, {String? at}) {
+    final moment = at == null ? null : _parseStamp(at);
+    GroupStatusChange? latest;
+    DateTime? latestAt;
+    for (final change in groupStatusChanges) {
+      if (change.groupId != groupId) continue;
+      final changedAt = _parseStamp(change.changedAt);
+      if (changedAt == null) continue;
+      if (moment != null && changedAt.isAfter(moment)) continue;
+      if (latestAt == null || !changedAt.isBefore(latestAt)) {
+        latest = change;
+        latestAt = changedAt;
+      }
+    }
+    return latest?.isActive ?? true;
+  }
+
+  /// Groups that can take new transactions - the ones shown on the
+  /// Add-transaction screen.
+  List<SpendingGroup> get activeGroups =>
+      spendingGroups.where((g) => isGroupActive(g.id)).toList();
+
+  /// [groupId]'s transactions from every member, newest first: the server's
+  /// copy plus [username]'s own tagged transactions that are still queued
+  /// offline, so the recap is complete without a network.
+  List<GroupTransaction> groupTransactionsFor(
+      String groupId, String username) {
+    final rows =
+        groupTransactions.where((t) => t.groupId == groupId).toList();
+    final known = rows.map((t) => t.transactionId).toSet();
+    for (final t in transactions) {
+      if (t.groupId != groupId || t.syncState != 'pending') continue;
+      if (known.contains(t.id)) continue;
+      rows.add(GroupTransaction(
+        groupId: groupId,
+        transactionType: t.type,
+        transactionId: t.id,
+        amount: t.amount,
+        description: t.description,
+        category: t.category ?? '',
+        date: t.date,
+        createdBy: username,
+        syncState: 'pending',
+      ));
+    }
+    rows.sort((a, b) => b.date.compareTo(a.date));
+    return rows;
+  }
+
+  /// A group transaction that happened while its group was switched off. The
+  /// recap counts these separately from the regular totals.
+  bool isAfterTurnedOff(GroupTransaction t) =>
+      !isGroupActive(t.groupId, at: t.date);
 }
+
+DateTime? _parseStamp(String value) =>
+    DateTime.tryParse(value.trim().replaceFirst(' ', 'T'));
 
 class PendingDelete {
   final String id;

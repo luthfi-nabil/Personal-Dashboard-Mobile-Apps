@@ -22,10 +22,12 @@ class AppMenuDrawer extends ConsumerWidget {
     final plannedSelected = currentPath.startsWith('/planned-expenses');
     final routineSelected = currentPath.startsWith('/routine-transactions');
     final investmentSelected = currentPath.startsWith('/investments');
+    final groupsSelected = currentPath.startsWith('/group-spendings');
     final financeSelected = currentPath == '/dashboard' ||
         plannedSelected ||
         routineSelected ||
-        investmentSelected;
+        investmentSelected ||
+        groupsSelected;
     final activitiesSelected = currentPath.startsWith('/activities');
     final consumablesSelected = currentPath.startsWith('/consumables');
     final personalSelected = activitiesSelected || consumablesSelected;
@@ -126,6 +128,15 @@ class AppMenuDrawer extends ConsumerWidget {
                         label: 'Routine Transaction',
                         route: '/routine-transactions',
                         selected: routineSelected,
+                        c: c,
+                        indented: true,
+                      ),
+                      _MenuTile(
+                        icon: Icons.groups_outlined,
+                        selectedIcon: Icons.groups_rounded,
+                        label: 'Group Spendings',
+                        route: '/group-spendings',
+                        selected: groupsSelected,
                         c: c,
                         indented: true,
                       ),

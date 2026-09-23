@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'app_update.dart';
 import 'config.dart';
 import 'db.dart';
 import 'remote_api.dart';
@@ -135,6 +136,9 @@ class SyncService {
       // refresh below reads back what this device already shows.
       await ConfigService.instance.pushPendingFeatures();
       await Repo.instance.syncPendingOptions();
+      // Groups before transactions: a transaction tagged into a group made
+      // offline needs that group to exist server-side first.
+      await Repo.instance.syncPendingGroupWrites();
       await Repo.instance.syncPendingTransactions();
       await Repo.instance.syncPendingDetailChecks();
       await Repo.instance.syncPendingDeletes();
@@ -142,6 +146,9 @@ class SyncService {
       await Repo.instance.syncPendingHealthWrites();
       await onRefresh?.call();
       _emit(SyncStatus.done);
+      // A sync that got this far means the server is around, so look for a
+      // new app build too (throttled; a no-op off Android).
+      unawaited(AppUpdateService.instance.check());
       return true;
     } catch (_) {
       _emit(SyncStatus.error);

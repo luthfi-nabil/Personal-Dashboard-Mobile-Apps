@@ -15,7 +15,11 @@ const _unreachableCooldown = Duration(seconds: 15);
 /// Thrown when transaction-api / health-api return an error response.
 class ApiException implements Exception {
   final String message;
-  const ApiException(this.message);
+
+  /// HTTP status of the rejecting response, when there was one. Lets a sync
+  /// loop tell a permanent rejection (404/409) from a transient failure.
+  final int? statusCode;
+  const ApiException(this.message, {this.statusCode});
   @override
   String toString() => message;
 }
@@ -140,7 +144,7 @@ class RemoteApi {
           ? body!['description'].toString()
           : (body?['message']?.toString() ?? 'HTTP ${res.statusCode}');
       if (res.statusCode == 401) throw ApiUnauthorizedException(msg);
-      throw ApiException(msg);
+      throw ApiException(msg, statusCode: res.statusCode);
     }
     if (body == null) return null;
     if (body['success'] == false) {
@@ -231,6 +235,13 @@ class RemoteApi {
         'POST',
         uri,
         () => http.post(uri, headers: _headers(), body: jsonEncode(body)),
+        body,
+      );
+
+  Future<dynamic> _put(Uri uri, Map<String, dynamic> body) => _send(
+        'PUT',
+        uri,
+        () => http.put(uri, headers: _headers(), body: jsonEncode(body)),
         body,
       );
 
@@ -370,6 +381,7 @@ class RemoteApi {
     required String sourceId,
     required String source,
     String? createdDate,
+    String? groupId,
   }) async =>
       Map<String, dynamic>.from(await _post(_txnUri('/earnings'), {
         'total_amount': totalAmount,
@@ -380,6 +392,7 @@ class RemoteApi {
         'source': source,
         if (createdDate != null && createdDate.isNotEmpty)
           'created_date': createdDate,
+        if (groupId != null && groupId.isNotEmpty) 'group_id': groupId,
       }) as Map);
 
   // ── transaction-api: spendings ─────────────────────────────────────────
@@ -430,6 +443,7 @@ class RemoteApi {
     required String source,
     List<Map<String, dynamic>> details = const [],
     String? createdDate,
+    String? groupId,
   }) async =>
       Map<String, dynamic>.from(await _post(_txnUri('/spendings'), {
         'total_amount': totalAmount,
@@ -441,6 +455,7 @@ class RemoteApi {
         if (details.isNotEmpty) 'details': details,
         if (createdDate != null && createdDate.isNotEmpty)
           'created_date': createdDate,
+        if (groupId != null && groupId.isNotEmpty) 'group_id': groupId,
       }) as Map);
 
   // ── health-api: insulin items ──────────────────────────────────────────
@@ -568,6 +583,226 @@ class RemoteApi {
       Map<String, dynamic>.from(await _post(
           _txnUri('/planned-transactions/$plannedTransactionId/details'),
           payload) as Map);
+
+  // ── transaction-api: spending groups ───────────────────────────────────
+  /// Every group the user belongs to, each with its `members` and
+  /// `status_log` embedded.
+  Future<List<Map<String, dynamic>>> getSpendingGroups() async =>
+      _list(await _get(_txnUri('/groups')));
+
+  /// Every member's tagged spendings/earnings across the user's groups.
+  Future<List<Map<String, dynamic>>> getGroupTransactions() async =>
+      _list(await _get(_txnUri('/group-transactions')));
+
+  /// Creates a group led by the user. Posting an id that already exists
+  /// renames it, so a write queued offline can be retried safely.
+  Future<void> createSpendingGroup({
+    required String id,
+    required String name,
+    String? createdDate,
+  }) =>
+      _post(_txnUri('/groups'), {
+        'group_id': id,
+        'group_name': name,
+        if (createdDate != null && createdDate.isNotEmpty)
+          'created_date': createdDate,
+      });
+
+  /// Adds [username] to the group and returns the name as the account is
+  /// actually spelled. The server rejects an unknown account with 404 and an
+  /// existing member with 409.
+  Future<String> addGroupMember({
+    required String groupId,
+    required String username,
+    String? addedDate,
+  }) async {
+    final data = await _post(_txnUri('/groups/$groupId/members'), {
+      'username': username,
+      if (addedDate != null && addedDate.isNotEmpty) 'added_date': addedDate,
+    });
+    return (data is Map ? data['username'] as String? : null) ?? username;
+  }
+
+  /// Leader-only on/off switch. [statusId] is client-generated so a retry
+  /// records the switch once, and [changedAt] is when it was flipped on the
+  /// device.
+  Future<void> setGroupStatus({
+    required String groupId,
+    required String statusId,
+    required bool isActive,
+    required String changedAt,
+  }) async {
+    final uri = _txnUri('/groups/$groupId/status');
+    final body = {
+      'status_id': statusId,
+      'is_active': isActive,
+      'changed_at': changedAt,
+    };
+    await _send(
+      'PUT',
+      uri,
+      () => http.put(uri, headers: _headers(), body: jsonEncode(body)),
+      body,
+    );
+  }
+
+  // ── transaction-api: group routines & planned expenses ─────────────────
+  Future<List<Map<String, dynamic>>> getGroupRoutines() async =>
+      _list(await _get(_txnUri('/group-routines')));
+
+  Future<List<Map<String, dynamic>>> getGroupRoutinePayments() async =>
+      _list(await _get(_txnUri('/group-routine-payments')));
+
+  Future<List<Map<String, dynamic>>> getGroupPlannedExpenses() async =>
+      _list(await _get(_txnUri('/group-planned-expenses')));
+
+  /// Leader-only. Posting an existing [routineId] edits that routine.
+  Future<void> saveGroupRoutine({
+    required String groupId,
+    required String routineId,
+    required String itemName,
+    required double price,
+    required String reminder,
+    required String categoryId,
+    required String category,
+  }) =>
+      _post(_txnUri('/groups/$groupId/routines'), {
+        'routine_id': routineId,
+        'item_name': itemName,
+        'price': price,
+        'reminder': reminder,
+        'spending_category_id': categoryId,
+        'spending_category': category,
+      });
+
+  Future<void> deleteGroupRoutine(String groupId, String routineId) =>
+      _delete(_txnUri('/groups/$groupId/routines/$routineId'));
+
+  /// Pays a group routine out of one of the caller's own sources (recorded
+  /// as the caller's spending, tagged into the group) or, when [sourceId] is
+  /// null, out of the caller's group balance.
+  Future<void> payGroupRoutine({
+    required String groupId,
+    required String routineId,
+    required String paymentId,
+    required double price,
+    String? sourceId,
+  }) =>
+      _post(_txnUri('/groups/$groupId/routines/$routineId/payments'), {
+        'payment_id': paymentId,
+        'price': price,
+        if (sourceId != null) 'source_id': sourceId,
+        'from_group_balance': sourceId == null,
+      });
+
+  /// The leader's items start `planned`; anyone else's start `requested`.
+  Future<Map<String, dynamic>> addGroupPlannedExpense({
+    required String groupId,
+    required String id,
+    required String itemName,
+    required double price,
+    required String categoryId,
+    required String category,
+    String notes = '',
+  }) async =>
+      Map<String, dynamic>.from(
+          await _post(_txnUri('/groups/$groupId/planned-expenses'), {
+        'planned_expense_id': id,
+        'item_name': itemName,
+        'price': price,
+        'spending_category_id': categoryId,
+        'spending_category': category,
+        'notes': notes,
+      }) as Map);
+
+  /// Leader-only: approve (`planned`) or reject a member's request.
+  Future<void> reviewGroupPlannedExpense(
+          String groupId, String id, bool approve) =>
+      _put(_txnUri('/groups/$groupId/planned-expenses/$id/review'),
+          {'approve': approve});
+
+  /// Buys a `planned` item out of one of the caller's own sources, or out of
+  /// the caller's group balance when [sourceId] is null.
+  Future<void> fulfillGroupPlannedExpense({
+    required String groupId,
+    required String id,
+    required String paymentId,
+    required double price,
+    String? sourceId,
+  }) =>
+      _put(_txnUri('/groups/$groupId/planned-expenses/$id/fulfill'), {
+        'payment_id': paymentId,
+        'price': price,
+        if (sourceId != null) 'source_id': sourceId,
+        'from_group_balance': sourceId == null,
+      });
+
+  Future<void> cancelGroupPlannedExpense(String groupId, String id) =>
+      _delete(_txnUri('/groups/$groupId/planned-expenses/$id'));
+
+  // ── transaction-api: group member balances ─────────────────────────────
+  /// Everyone's balance for the leader, only the caller's for anyone else.
+  Future<Map<String, dynamic>> getGroupBalances(String groupId) async =>
+      Map<String, dynamic>.from(
+          await _get(_txnUri('/groups/$groupId/balances')) as Map);
+
+  /// Adds to the caller's own group balance - never anyone else's.
+  Future<void> topUpGroupBalance({
+    required String groupId,
+    required String entryId,
+    required double amount,
+    String description = '',
+  }) =>
+      _post(_txnUri('/groups/$groupId/balance/top-ups'), {
+        'entry_id': entryId,
+        'amount': amount,
+        'description': description,
+      });
+
+  /// A group transaction paid from the caller's group balance.
+  Future<void> spendGroupBalance({
+    required String groupId,
+    required String entryId,
+    required double amount,
+    required String categoryId,
+    required String category,
+    String description = '',
+  }) =>
+      _post(_txnUri('/groups/$groupId/balance/spendings'), {
+        'entry_id': entryId,
+        'amount': amount,
+        'description': description,
+        'spending_category_id': categoryId,
+        'spending_category': category,
+      });
+
+  // ── transaction-api: transfers to group members ─────────────────────────
+  /// Source names of a group mate, to pick where a transfer lands.
+  Future<List<Map<String, dynamic>>> getMemberSources(String username) async =>
+      _list(await _get(
+          _txnUri('/member-sources/${Uri.encodeComponent(username)}')));
+
+  /// Sends [amount] from one of the caller's sources to one of
+  /// [toUsername]'s. [transferId] is client-generated so a retry sends once.
+  Future<void> sendMemberTransfer({
+    required String transferId,
+    required String toUsername,
+    required String fromSourceId,
+    required String toSourceId,
+    required double amount,
+    String description = '',
+    String? createdDate,
+  }) =>
+      _post(_txnUri('/member-transfers'), {
+        'transfer_id': transferId,
+        'to_username': toUsername,
+        'from_source_id': fromSourceId,
+        'to_source_id': toSourceId,
+        'amount': amount,
+        'description': description,
+        if (createdDate != null && createdDate.isNotEmpty)
+          'created_date': createdDate,
+      });
 
   // ── transaction-api: investments ───────────────────────────────────────
   Future<List<Map<String, dynamic>>> getInvestments() async =>

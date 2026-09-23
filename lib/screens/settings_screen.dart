@@ -10,6 +10,7 @@ import '../core/models.dart';
 import '../core/seed.dart';
 import '../core/sync.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_update_widgets.dart';
 import '../providers/providers.dart';
 import 'dart:convert';
 import 'package:share_plus/share_plus.dart';
@@ -394,6 +395,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const SizedBox(height: 18),
           ],
+
+          // ── App update ─────────────────────────────────────────
+          _SectionTitle('App update', c),
+          const SizedBox(height: 10),
+          _card(c, const AppUpdateCard()),
+          const SizedBox(height: 18),
 
           // ── Appearance ─────────────────────────────────────────
           _SectionTitle('Appearance', c),

@@ -230,6 +230,31 @@ Implementation (`lib/core/`):
 
 Run `flutter pub get` after pulling this change to fetch `archive`.
 
+## In-app updates (Android)
+
+The Android app updates itself from the `desktop-updates` container in the
+root `docker-compose.yml` (nginx on port **3054**, this app under `/android/`,
+serving `releases/`).
+
+1. Publish: `.\publish-update.ps1` (build number +1), or with
+   `-Bump patch|minor|major` and `-Notes "..."`. It bumps `pubspec.yaml`,
+   runs `flutter build apk --release`, and copies the APK plus a
+   `version.json` (version, build, SHA-256) into `releases/`.
+2. After a sync reaches the server (at most every 15 min), or from
+   Settings → App update → *Check now*, the app compares `build` with its
+   installed versionCode, downloads a newer APK in the background, checks
+   its SHA-256 and shows an **Install** banner under the top bar.
+3. Tapping Install opens Android's installer. Android always asks for this
+   confirmation for a sideloaded app; the first time it also asks you to allow
+   "Install unknown apps" for Personal Dashboard.
+
+The server defaults to the Transaction API host on port 3054, and can be
+changed in Settings. Updates only install over an APK signed with the **same
+key** — release builds are signed with this PC's debug keystore, so always
+publish from this machine. iOS is not supported (no sideloaded updates there).
+Code: `lib/core/app_update.dart`, `lib/widgets/app_update_widgets.dart`, and
+the `personal_dashboard/app_update` channel in `MainActivity.kt`.
+
 ## Building / Deployment
 
 ```bash

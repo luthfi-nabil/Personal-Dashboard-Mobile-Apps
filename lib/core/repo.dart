@@ -58,7 +58,8 @@ class Repo {
     try {
       final data = await _fetchRemote(cfg);
       await _cacheRemote(data, cfg.userId);
-      return _withPending(data, cfg.userId);
+      return _withCachedGroups(
+          await _withPending(data, cfg.userId), cfg.userId);
     } on ApiUnauthorizedException {
       // Keep the saved session. The dashboard can continue using cached data,
       // and explicit logout remains the only automatic route back to /login.
@@ -249,22 +250,44 @@ class Repo {
       AppDb.instance.getPlannedTransactions(userId),
       AppDb.instance.getPlannedTransactionDetails(userId),
     ]);
-    return AppData(
-      sources: results[0] as List<Source>,
-      categories: results[1] as List<Category>,
-      transactions: results[2] as List<Transaction>,
-      plannedExpenseItems: results[3] as List<PlannedExpenseItem>,
-      routineTransactions: results[4] as List<RoutineTransaction>,
-      routinePayments: results[5] as List<RoutinePayment>,
-      insulinItems: results[6] as List<InsulinItem>,
-      insulinAssigns: results[7] as List<InsulinAssign>,
-      insulinUsages: results[8] as List<InsulinUsage>,
-      bloodSugarLogs: results[9] as List<BloodSugarLog>,
-      transactionDetails: results[10] as List<TransactionDetail>,
-      consumables: results[11] as List<Consumable>,
-      investments: results[12] as List<Investment>,
-      plannedTransactions: results[13] as List<PlannedTransaction>,
-      plannedTransactionDetails: results[14] as List<PlannedTransactionDetail>,
+    return _withCachedGroups(
+      AppData(
+        sources: results[0] as List<Source>,
+        categories: results[1] as List<Category>,
+        transactions: results[2] as List<Transaction>,
+        plannedExpenseItems: results[3] as List<PlannedExpenseItem>,
+        routineTransactions: results[4] as List<RoutineTransaction>,
+        routinePayments: results[5] as List<RoutinePayment>,
+        insulinItems: results[6] as List<InsulinItem>,
+        insulinAssigns: results[7] as List<InsulinAssign>,
+        insulinUsages: results[8] as List<InsulinUsage>,
+        bloodSugarLogs: results[9] as List<BloodSugarLog>,
+        transactionDetails: results[10] as List<TransactionDetail>,
+        consumables: results[11] as List<Consumable>,
+        investments: results[12] as List<Investment>,
+        plannedTransactions: results[13] as List<PlannedTransaction>,
+        plannedTransactionDetails:
+            results[14] as List<PlannedTransactionDetail>,
+      ),
+      userId,
+    );
+  }
+
+  /// Fills in the spending-group lists from the local cache, which after a
+  /// refresh holds the server's rows plus anything still queued offline - so
+  /// a group created or switched without a network shows up either way.
+  Future<AppData> _withCachedGroups(AppData data, String userId) async {
+    final results = await Future.wait([
+      AppDb.instance.getSpendingGroups(userId),
+      AppDb.instance.getGroupMembers(userId),
+      AppDb.instance.getGroupStatusChanges(userId),
+      AppDb.instance.getGroupTransactions(userId),
+    ]);
+    return data.withGroups(
+      spendingGroups: results[0] as List<SpendingGroup>,
+      groupMembers: results[1] as List<GroupMember>,
+      groupStatusChanges: results[2] as List<GroupStatusChange>,
+      groupTransactions: results[3] as List<GroupTransaction>,
     );
   }
 
@@ -351,6 +374,45 @@ class Repo {
     final plannedTransactionDetails = fetchedPlannedTransactionDetails ??
         await AppDb.instance.getPlannedTransactionDetails(cfg.userId);
 
+    // Spending groups are best-effort too: an API older than the feature has
+    // no /groups, and the cached copy keeps the recap readable meanwhile.
+    List<SpendingGroup>? fetchedGroups;
+    List<GroupMember>? fetchedGroupMembers;
+    List<GroupStatusChange>? fetchedGroupStatusChanges;
+    List<GroupTransaction>? fetchedGroupTransactions;
+    try {
+      final rawGroups = await api.getSpendingGroups();
+      List<Map<String, dynamic>> nested(Map<String, dynamic> g, String key) =>
+          (g[key] as List? ?? const [])
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+      fetchedGroups = rawGroups.map(SpendingGroup.fromApi).toList();
+      fetchedGroupMembers = [
+        for (final g in rawGroups)
+          ...nested(g, 'members').map(GroupMember.fromApi),
+      ];
+      fetchedGroupStatusChanges = [
+        for (final g in rawGroups)
+          ...nested(g, 'status_log').map(GroupStatusChange.fromApi),
+      ];
+      fetchedGroupTransactions = (await api.getGroupTransactions())
+          .map(GroupTransaction.fromApi)
+          .toList();
+    } catch (_) {
+      fetchedGroups = null;
+      fetchedGroupMembers = null;
+      fetchedGroupStatusChanges = null;
+      fetchedGroupTransactions = null;
+    }
+    final spendingGroups =
+        fetchedGroups ?? await AppDb.instance.getSpendingGroups(cfg.userId);
+    final groupMembers = fetchedGroupMembers ??
+        await AppDb.instance.getGroupMembers(cfg.userId);
+    final groupStatusChanges = fetchedGroupStatusChanges ??
+        await AppDb.instance.getGroupStatusChanges(cfg.userId);
+    final groupTransactions = fetchedGroupTransactions ??
+        await AppDb.instance.getGroupTransactions(cfg.userId);
+
     String? transferCategoryName;
     try {
       final settings = await api.getSettings();
@@ -405,8 +467,17 @@ class Repo {
           )),
     ];
 
+    // The spending/earning endpoints know nothing about groups, so the flag
+    // on the user's own transactions is read back from the group side.
+    final groupOfTransaction = {
+      for (final t in groupTransactions) t.transactionId: t.groupId,
+    };
     final transactions =
-        _pairTransfers(rawEarnings, rawSpendings, transferCategoryName);
+        _pairTransfers(rawEarnings, rawSpendings, transferCategoryName)
+            .map((t) => groupOfTransaction.containsKey(t.id)
+                ? t.copyWith(groupId: groupOfTransaction[t.id])
+                : t)
+            .toList();
     final plannedExpenseItems =
         rawPlannedExpenses.map(PlannedExpenseItem.fromMap).toList();
     final routineTransactions =
@@ -453,6 +524,10 @@ class Repo {
       investments: investments,
       plannedTransactions: plannedTransactions,
       plannedTransactionDetails: plannedTransactionDetails,
+      spendingGroups: spendingGroups,
+      groupMembers: groupMembers,
+      groupStatusChanges: groupStatusChanges,
+      groupTransactions: groupTransactions,
       insulinItems: insulinItems,
       insulinAssigns: insulinAssigns,
       insulinUsages: insulinUsages,
@@ -579,6 +654,12 @@ class Repo {
         .replacePlannedTransactions(data.plannedTransactions, userId);
     await AppDb.instance.replacePlannedTransactionDetails(
         data.plannedTransactionDetails, userId);
+    await AppDb.instance.replaceSpendingGroups(data.spendingGroups, userId);
+    await AppDb.instance.replaceGroupMembers(data.groupMembers, userId);
+    await AppDb.instance
+        .replaceGroupStatusChanges(data.groupStatusChanges, userId);
+    await AppDb.instance
+        .replaceGroupTransactions(data.groupTransactions, userId);
     await AppDb.instance.replaceInsulinItems(data.insulinItems, userId);
     await AppDb.instance.replaceInsulinAssigns(data.insulinAssigns, userId);
     await AppDb.instance.replaceInsulinUsages(data.insulinUsages, userId);
@@ -694,6 +775,7 @@ class Repo {
     required String description,
     required Category category,
     required Source source,
+    String? groupId,
   }) async {
     // Stamped once, before the API is even tried, so the transaction carries
     // the moment it was entered whichever branch it takes.
@@ -710,6 +792,7 @@ class Repo {
         date: enteredAt,
         syncState: 'pending',
         updatedAt: _nowIso(),
+        groupId: groupId,
       ));
       return true;
     }
@@ -717,6 +800,10 @@ class Repo {
     // With no network there is nothing to try - queue straight away rather
     // than making the user watch a request that cannot succeed.
     if (!SyncService.instance.isOnline) return savePending();
+
+    // A group made offline must reach the server before a transaction is
+    // tagged into it, or the server would drop the tag.
+    if (groupId != null) await syncPendingGroupWrites();
 
     try {
       await _withTokenRefresh(() => RemoteApi(_cfg).createEarning(
@@ -727,6 +814,7 @@ class Repo {
             sourceId: source.id,
             source: source.name,
             createdDate: enteredAt,
+            groupId: groupId,
           ));
       return false;
     } on ApiUnavailableException {
@@ -746,6 +834,7 @@ class Repo {
     required Category category,
     required Source source,
     List<TransactionDetail> details = const [],
+    String? groupId,
   }) async {
     final enteredAt = _nowGmtPlus7Iso();
 
@@ -761,6 +850,7 @@ class Repo {
         date: enteredAt,
         syncState: 'pending',
         updatedAt: _nowIso(),
+        groupId: groupId,
       ));
       await _queuePendingDetails(localId, details);
       return true;
@@ -768,6 +858,10 @@ class Repo {
 
     // See [createEarning]: offline means queue now, don't wait on a request.
     if (!SyncService.instance.isOnline) return savePending();
+
+    // A group made offline must reach the server before a transaction is
+    // tagged into it, or the server would drop the tag.
+    if (groupId != null) await syncPendingGroupWrites();
 
     try {
       await _withTokenRefresh(() => RemoteApi(_cfg).createSpending(
@@ -779,6 +873,7 @@ class Repo {
             source: source.name,
             details: details.map((d) => d.toApiPayload()).toList(),
             createdDate: enteredAt,
+            groupId: groupId,
           ));
       return false;
     } on ApiUnavailableException {
@@ -1301,6 +1396,247 @@ class Repo {
           row.copyWith(syncState: 'pending'), _userId);
       await _refreshPendingCount();
     }
+  }
+
+  // ── Spending groups ─────────────────────────────────────────────────
+  /// Group membership is by username - the same name transaction-api reads
+  /// from the JWT - not by the local cache's [_userId].
+  String get _username => _cfg.username.trim();
+
+  /// Creates a group led by the signed-in user. It is written locally first,
+  /// so it can be picked on the Add-transaction screen straight away, online
+  /// or not; the server upserts on the client-generated id.
+  Future<SpendingGroup> createSpendingGroup(String name) async {
+    final now = _nowGmtPlus7Iso();
+    final group = SpendingGroup(
+      id: _uuid.v4(),
+      name: name.trim(),
+      leader: _username,
+      createdDate: now,
+      updatedAt: _nowIso(),
+      syncState: 'pending',
+    );
+    final leader = GroupMember(
+      groupId: group.id,
+      username: _username,
+      addedBy: _username,
+      addedDate: now,
+      syncState: 'pending',
+    );
+    await AppDb.instance.putSpendingGroup(group, _userId);
+    await AppDb.instance.putGroupMember(leader, _userId);
+    try {
+      if (await _pushOrQueue(() => RemoteApi(_cfg).createSpendingGroup(
+          id: group.id, name: group.name, createdDate: now))) {
+        // The server adds the leader as a member on its own.
+        await AppDb.instance
+            .putSpendingGroup(group.copyWith(syncState: 'synced'), _userId);
+        await AppDb.instance
+            .putGroupMember(leader.copyWith(syncState: 'synced'), _userId);
+      }
+    } on ApiException {
+      await AppDb.instance.deleteSpendingGroup(group.id, _userId);
+      rethrow;
+    }
+    return group;
+  }
+
+  /// Adds another user to [group] by username. Any member may do this.
+  ///
+  /// The server checks the account exists and is not already in the group,
+  /// and answers with the name as the account spells it. Returns `true` when
+  /// that happened now, `false` when the add was queued offline - it is then
+  /// verified on sync, and dropped if the account turns out not to exist.
+  Future<bool> addGroupMember(SpendingGroup group, String username) async {
+    final name = username.trim();
+    if (name.isEmpty) throw const ApiException('Enter a username.');
+    final existing = await AppDb.instance.getGroupMembers(_userId);
+    if (existing.any((m) =>
+        m.groupId == group.id && _sameName(m.username, name))) {
+      throw ApiException('$name is already a member.', statusCode: 409);
+    }
+
+    final member = GroupMember(
+      groupId: group.id,
+      username: name,
+      addedBy: _username,
+      addedDate: _nowGmtPlus7Iso(),
+      syncState: 'pending',
+    );
+    await AppDb.instance.putGroupMember(member, _userId);
+    var canonical = name;
+    try {
+      final pushed = await _pushOrQueue(() async {
+        canonical = await RemoteApi(_cfg).addGroupMember(
+            groupId: group.id,
+            username: member.username,
+            addedDate: member.addedDate);
+      });
+      if (!pushed) return false;
+      await _storeVerifiedMember(member, canonical, _userId);
+      return true;
+    } on ApiException {
+      await AppDb.instance
+          .deleteGroupMember(group.id, member.username, _userId);
+      rethrow;
+    }
+  }
+
+  /// Replaces a queued member row with the server-confirmed one, whose name
+  /// may differ in casing from what was typed.
+  Future<void> _storeVerifiedMember(
+      GroupMember queued, String canonical, String userId) async {
+    if (canonical != queued.username) {
+      await AppDb.instance
+          .deleteGroupMember(queued.groupId, queued.username, userId);
+    }
+    await AppDb.instance.putGroupMember(
+      GroupMember(
+        groupId: queued.groupId,
+        username: canonical,
+        addedBy: queued.addedBy,
+        addedDate: queued.addedDate,
+        syncState: 'synced',
+      ),
+      userId,
+    );
+  }
+
+  /// Switches [group] on or off. Leader only.
+  ///
+  /// Recorded as a timestamped switch rather than a flag, so transactions
+  /// entered while the group was off - including ones sitting in another
+  /// member's offline queue - are counted as "after turned off" in the recap.
+  Future<void> setSpendingGroupActive(SpendingGroup group, bool active) async {
+    if (group.leader != _username) {
+      throw const ApiException(
+          'Only the group leader can switch this group on or off.');
+    }
+    final change = GroupStatusChange(
+      id: _uuid.v4(),
+      groupId: group.id,
+      isActive: active,
+      changedBy: _username,
+      changedAt: _nowGmtPlus7Iso(),
+      syncState: 'pending',
+    );
+    await AppDb.instance.putGroupStatusChange(change, _userId);
+    try {
+      if (await _pushOrQueue(() => RemoteApi(_cfg).setGroupStatus(
+          groupId: group.id,
+          statusId: change.id,
+          isActive: active,
+          changedAt: change.changedAt))) {
+        await AppDb.instance.putGroupStatusChange(
+            change.copyWith(syncState: 'synced'), _userId);
+      }
+    } on ApiException {
+      await AppDb.instance.deleteGroupStatusChange(change.id, _userId);
+      rethrow;
+    }
+  }
+
+  /// Runs [push] when there is any chance of it working. Returns `false` when
+  /// the write stays queued because the API is unreachable; any other failure
+  /// is rethrown so the caller can undo its local write.
+  Future<bool> _pushOrQueue(Future<void> Function() push) async {
+    if (!SyncService.instance.isOnline) {
+      await _refreshPendingCount();
+      return false;
+    }
+    try {
+      await _withTokenRefresh(push);
+      return true;
+    } on ApiUnavailableException {
+      await _refreshPendingCount();
+      return false;
+    }
+  }
+
+  /// Pushes group writes made offline: groups first, then members, then
+  /// on/off switches, since each needs the one before it to exist
+  /// server-side. Runs ahead of the transaction queue so a transaction tagged
+  /// into a group made offline is not pushed before its group.
+  Future<void> syncPendingGroupWrites() async {
+    final cfg = _cfg;
+    final remote = RemoteApi(cfg);
+
+    for (final group
+        in await AppDb.instance.getPendingSpendingGroups(cfg.userId)) {
+      try {
+        await remote.createSpendingGroup(
+            id: group.id, name: group.name, createdDate: group.createdDate);
+        await AppDb.instance.putSpendingGroup(
+            group.copyWith(syncState: 'synced'), cfg.userId);
+        // The server enrols the leader itself; posting them again as a
+        // member would only be rejected as a duplicate.
+        await AppDb.instance.putGroupMember(
+          GroupMember(
+            groupId: group.id,
+            username: group.leader,
+            addedBy: group.leader,
+            addedDate: group.createdDate,
+            syncState: 'synced',
+          ),
+          cfg.userId,
+        );
+      } on ApiUnavailableException {
+        break;
+      } catch (_) {
+        // Keep the pending row for a later retry.
+      }
+    }
+
+    // A member queued under a group that has not reached the server yet
+    // would be rejected as "not found"; wait for the group instead.
+    final unsyncedGroupIds = {
+      for (final g in await AppDb.instance.getPendingSpendingGroups(cfg.userId))
+        g.id,
+    };
+    for (final member
+        in await AppDb.instance.getPendingGroupMembers(cfg.userId)) {
+      if (unsyncedGroupIds.contains(member.groupId)) continue;
+      try {
+        final canonical = await remote.addGroupMember(
+            groupId: member.groupId,
+            username: member.username,
+            addedDate: member.addedDate);
+        await _storeVerifiedMember(member, canonical, cfg.userId);
+      } on ApiUnavailableException {
+        break;
+      } on ApiException catch (e) {
+        // 404: no such account (added offline, so it could not be checked
+        // then). 409: someone else added them first. Neither will ever
+        // succeed, so drop the queued row; the next refresh shows the real
+        // member list. Anything else is kept for a later retry.
+        if (e.statusCode == 404 || e.statusCode == 409) {
+          await AppDb.instance
+              .deleteGroupMember(member.groupId, member.username, cfg.userId);
+        }
+      } catch (_) {
+        // Keep the pending row for a later retry.
+      }
+    }
+
+    for (final change
+        in await AppDb.instance.getPendingGroupStatusChanges(cfg.userId)) {
+      try {
+        await remote.setGroupStatus(
+            groupId: change.groupId,
+            statusId: change.id,
+            isActive: change.isActive,
+            changedAt: change.changedAt);
+        await AppDb.instance.putGroupStatusChange(
+            change.copyWith(syncState: 'synced'), cfg.userId);
+      } on ApiUnavailableException {
+        break;
+      } catch (_) {
+        // Keep the pending row for a later retry.
+      }
+    }
+
+    SyncService.instance.updatePendingCount(
+        await AppDb.instance.getPendingWriteCount(cfg.userId));
   }
 
   // ── Investments ──────────────────────────────────────────────────────
@@ -1927,6 +2263,7 @@ class Repo {
               sourceId: src.id,
               source: src.name,
               createdDate: t.date,
+              groupId: t.groupId,
             );
             break;
           case 'spending':
@@ -1946,6 +2283,7 @@ class Repo {
               source: src.name,
               details: queuedDetails.map((d) => d.toApiPayload()).toList(),
               createdDate: t.date,
+              groupId: t.groupId,
             );
             break;
           case 'transfer':

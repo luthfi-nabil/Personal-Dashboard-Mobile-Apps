@@ -82,10 +82,21 @@ class TxnTile extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 2),
-                  Text(
-                    '$sub · ${fmtDate(t.date, 'time')}',
-                    style: TextStyle(fontSize: 12, color: c.muted),
-                    overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      // Tagged into a spending group.
+                      if (t.groupId != null) ...[
+                        Icon(Icons.groups_rounded, size: 13, color: c.muted),
+                        const SizedBox(width: 4),
+                      ],
+                      Expanded(
+                        child: Text(
+                          '$sub · ${fmtDate(t.date, 'time')}',
+                          style: TextStyle(fontSize: 12, color: c.muted),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),

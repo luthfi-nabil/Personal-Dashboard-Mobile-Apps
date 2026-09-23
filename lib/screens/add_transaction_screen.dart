@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
+import '../core/group_models.dart';
+import '../core/group_service.dart';
 import '../core/models.dart';
 import '../core/receipt_scanner.dart';
 import '../core/repo.dart';
@@ -60,6 +62,19 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   String _toSource = '';
   String _category = '';
   bool _saving = false;
+
+  /// Tag the transaction into a spending group. Only offered while at least
+  /// one group is switched on, and never for transfers.
+  bool _addToGroup = false;
+  String _groupId = '';
+
+  /// Transfer only: send to another group member's source instead of between
+  /// the user's own sources. Money only ever goes from the user outwards.
+  bool _toMember = false;
+  String _recipient = '';
+  String _recipientSourceId = '';
+  List<MemberSource>? _recipientSources;
+  String? _recipientSourcesError;
 
   /// Line items saved alongside the spending as its "transaction detail".
   final List<TransactionDetail> _details = [];
@@ -139,17 +154,70 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     });
   }
 
+  /// Everyone who shares a group with the user, once each.
+  List<String> _transferRecipients(AppData data) {
+    final me = ref.read(configProvider).username.trim().toLowerCase();
+    final seen = <String>{};
+    final names = <String>[];
+    for (final m in data.groupMembers) {
+      final key = m.username.toLowerCase();
+      // A member added offline is not verified yet, so it cannot receive.
+      if (key == me || m.syncState == 'pending' || !seen.add(key)) continue;
+      names.add(m.username);
+    }
+    return names..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  }
+
+  /// Fetches where [username] can receive money. Results for a recipient the
+  /// user has meanwhile switched away from are dropped.
+  Future<void> _selectRecipient(String username) async {
+    setState(() {
+      _recipient = username;
+      _recipientSourceId = '';
+      _recipientSources = null;
+      _recipientSourcesError = null;
+    });
+    try {
+      final sources = await GroupService.instance.memberSources(username);
+      if (!mounted || _recipient != username) return;
+      setState(() => _recipientSources = sources);
+    } on ApiException catch (e) {
+      if (!mounted || _recipient != username) return;
+      setState(() => _recipientSourcesError = e.message);
+    }
+  }
+
   Future<void> _save(AppData data) async {
     if (!_formKey.currentState!.validate()) return;
-    if (_type == 'transfer' && _fromSource == _toSource) {
+    if (_type == 'transfer' && !_toMember && _fromSource == _toSource) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('From and To sources must be different.')),
       );
       return;
     }
 
+    if (_type == 'transfer' &&
+        _toMember &&
+        (_recipient.isEmpty || _recipientSourceId.isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Choose who receives it and which source.')),
+      );
+      return;
+    }
+
     final amount = double.tryParse(_amtCtl.text.replaceAll(',', '.')) ?? 0;
     final description = _descCtl.text.trim();
+    final activeGroupIds = data.activeGroups.map((g) => g.id).toSet();
+    final groupId = _type != 'transfer' && _addToGroup
+        ? (activeGroupIds.contains(_groupId) ? _groupId : null)
+        : null;
+    if (_type != 'transfer' && _addToGroup && groupId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Choose which group to add this to.')),
+      );
+      return;
+    }
 
     setState(() => _saving = true);
     try {
@@ -164,6 +232,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             description: description,
             category: category,
             source: source,
+            groupId: groupId,
           );
           break;
         case 'spending':
@@ -176,6 +245,19 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             category: category,
             source: source,
             details: _details,
+            groupId: groupId,
+          );
+          break;
+        case 'transfer' when _toMember:
+          // Online only: the server checks the destination really belongs to
+          // the recipient and books both halves at once.
+          final from = data.sources.firstWhere((s) => s.name == _fromSource);
+          await GroupService.instance.transferToMember(
+            toUsername: _recipient,
+            fromSourceId: from.id,
+            toSourceId: _recipientSourceId,
+            amount: amount,
+            description: description,
           );
           break;
         case 'transfer':
@@ -401,6 +483,69 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
 
                   // Source fields
                   if (_type == 'transfer') ...[
+                    _TransferToUserSwitch(
+                      value: _toMember,
+                      available: _transferRecipients(data).isNotEmpty,
+                      c: c,
+                      onChanged: (v) => setState(() => _toMember = v),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  if (_type == 'transfer' && _toMember) ...[
+                    _Field(
+                        label: 'From (your source)',
+                        child: _SourceDropdown(
+                          value: _fromSource,
+                          sources: data.sources,
+                          c: c,
+                          hint: 'Select source…',
+                          onChanged: (v) =>
+                              setState(() => _fromSource = v ?? ''),
+                        )),
+                    const SizedBox(height: 14),
+                    _Field(
+                        label: 'To member',
+                        child: _PlainDropdown(
+                          value: _recipient,
+                          items: {
+                            for (final name in _transferRecipients(data))
+                              name: name,
+                          },
+                          c: c,
+                          hint: 'Select member…',
+                          onChanged: (v) {
+                            if (v != null && v != _recipient) {
+                              _selectRecipient(v);
+                            }
+                          },
+                        )),
+                    const SizedBox(height: 14),
+                    if (_recipient.isNotEmpty)
+                      _Field(
+                          label: "To $_recipient's source",
+                          child: _recipientSourcesError != null
+                              ? Text(_recipientSourcesError!,
+                                  style: TextStyle(color: c.neg, fontSize: 13))
+                              : _recipientSources == null
+                                  ? LinearProgressIndicator(color: c.accent)
+                                  : _recipientSources!.isEmpty
+                                      ? Text(
+                                          '$_recipient has no sources to '
+                                          'receive money yet.',
+                                          style: TextStyle(
+                                              color: c.muted, fontSize: 13))
+                                      : _PlainDropdown(
+                                          value: _recipientSourceId,
+                                          items: {
+                                            for (final s in _recipientSources!)
+                                              s.id: s.name,
+                                          },
+                                          c: c,
+                                          hint: 'Select destination…',
+                                          onChanged: (v) => setState(() =>
+                                              _recipientSourceId = v ?? ''),
+                                        )),
+                  ] else if (_type == 'transfer') ...[
                     _Field(
                         label: 'From',
                         child: _SourceDropdown(
@@ -441,6 +586,27 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
                           onChanged: (v) => setState(() => _category = v ?? ''),
                         )),
                     const SizedBox(height: 14),
+                    // Only shown while some group is switched on; a group the
+                    // leader turned off stops being offered here.
+                    if (data.activeGroups.isNotEmpty) ...[
+                      _GroupPicker(
+                        groups: data.activeGroups,
+                        enabled: _addToGroup,
+                        groupId: _groupId,
+                        c: c,
+                        onEnabledChanged: (v) => setState(() {
+                          _addToGroup = v;
+                          if (v &&
+                              !data.activeGroups
+                                  .any((g) => g.id == _groupId)) {
+                            _groupId = data.activeGroups.first.id;
+                          }
+                        }),
+                        onGroupChanged: (v) =>
+                            setState(() => _groupId = v ?? ''),
+                      ),
+                      const SizedBox(height: 14),
+                    ],
                     if (_type == 'spending')
                       _DetailSection(
                         details: _details,
@@ -520,6 +686,10 @@ class _ReadOnlyTransactionView extends ConsumerWidget {
           data: (data) => data.plannedTransactions,
           orElse: () => const <PlannedTransaction>[],
         );
+    final groupName = ref.watch(appDataProvider).maybeWhen<String?>(
+          data: (data) => data.groupById(t.groupId)?.name,
+          orElse: () => null,
+        );
 
     return Scaffold(
       backgroundColor: c.bg,
@@ -584,6 +754,11 @@ class _ReadOnlyTransactionView extends ConsumerWidget {
                     _DetailRow(label: 'Source', value: t.source ?? '—', c: c),
                     _DetailRow(
                         label: 'Category', value: t.category ?? '—', c: c),
+                    if (t.groupId != null)
+                      _DetailRow(
+                          label: 'Group',
+                          value: groupName ?? 'Group spending',
+                          c: c),
                   ],
                   _DetailRow(
                       label: 'Date',
@@ -977,6 +1152,95 @@ class _Field extends StatelessWidget {
   }
 }
 
+/// "Transfer to user" toggle at the top of the transfer form.
+class _TransferToUserSwitch extends StatelessWidget {
+  final bool value;
+
+  /// Whether the user shares a group with anyone to send to.
+  final bool available;
+  final AppColors c;
+  final ValueChanged<bool> onChanged;
+
+  const _TransferToUserSwitch({
+    required this.value,
+    required this.available,
+    required this.c,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.line, width: 0.5),
+      ),
+      child: SwitchListTile(
+        value: value && available,
+        onChanged: available ? onChanged : null,
+        dense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14),
+        title: Text('Transfer to user',
+            style: TextStyle(fontSize: 15, color: c.ink)),
+        subtitle: Text(
+          available
+              ? 'Send from your source to a group member\'s source.'
+              : 'Join a group to send money to its members.',
+          style: TextStyle(fontSize: 12, color: c.muted),
+        ),
+      ),
+    );
+  }
+}
+
+/// A required dropdown over `value -> label` pairs.
+class _PlainDropdown extends StatelessWidget {
+  final String value;
+  final Map<String, String> items;
+  final AppColors c;
+  final String hint;
+  final ValueChanged<String?> onChanged;
+
+  const _PlainDropdown({
+    required this.value,
+    required this.items,
+    required this.c,
+    required this.hint,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      // Keyed so a new recipient's list starts from a clean selection.
+      key: ValueKey(items.keys.join('|')),
+      initialValue: items.containsKey(value) ? value : null,
+      hint: Text(hint, style: TextStyle(color: c.muted)),
+      decoration: InputDecoration(
+        filled: true,
+        fillColor: c.surface,
+        border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: c.line, width: 0.5)),
+        enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: c.line, width: 0.5)),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      ),
+      items: [
+        for (final e in items.entries)
+          DropdownMenuItem(value: e.key, child: Text(e.value)),
+      ],
+      onChanged: onChanged,
+      validator: (v) => v == null || v.isEmpty ? 'Required' : null,
+      dropdownColor: c.surface,
+      style: TextStyle(color: c.ink, fontSize: 15),
+    );
+  }
+}
+
 class _SourceDropdown extends StatelessWidget {
   final String value;
   final List<Source> sources;
@@ -1054,6 +1318,85 @@ class _CategoryDropdown extends StatelessWidget {
       validator: (v) => v == null || v.isEmpty ? 'Required' : null,
       dropdownColor: c.surface,
       style: TextStyle(color: c.ink, fontSize: 15),
+    );
+  }
+}
+
+/// "Add to group spending" checkbox, revealing a group dropdown once ticked.
+/// The transaction is saved to the user's own records either way; the group
+/// only gets a flag pointing back at it.
+class _GroupPicker extends StatelessWidget {
+  final List<SpendingGroup> groups;
+  final bool enabled;
+  final String groupId;
+  final AppColors c;
+  final ValueChanged<bool> onEnabledChanged;
+  final ValueChanged<String?> onGroupChanged;
+
+  const _GroupPicker({
+    required this.groups,
+    required this.enabled,
+    required this.groupId,
+    required this.c,
+    required this.onEnabledChanged,
+    required this.onGroupChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = groups.any((g) => g.id == groupId) ? groupId : null;
+    return Container(
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.line, width: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          CheckboxListTile(
+            value: enabled,
+            onChanged: (v) => onEnabledChanged(v ?? false),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+            dense: true,
+            title: Text('Add to group spending',
+                style: TextStyle(fontSize: 15, color: c.ink)),
+            subtitle: Text('Still recorded in your own transactions.',
+                style: TextStyle(fontSize: 12, color: c.muted)),
+          ),
+          if (enabled)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: DropdownButtonFormField<String>(
+                value: selected,
+                hint: Text('Select group…', style: TextStyle(color: c.muted)),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: c.surface2,
+                  prefixIcon:
+                      Icon(Icons.groups_outlined, color: c.muted, size: 20),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: c.line, width: 0.5)),
+                  enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: c.line, width: 0.5)),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                ),
+                items: groups
+                    .map((g) =>
+                        DropdownMenuItem(value: g.id, child: Text(g.name)))
+                    .toList(),
+                onChanged: onGroupChanged,
+                validator: (v) => v == null || v.isEmpty ? 'Required' : null,
+                dropdownColor: c.surface,
+                style: TextStyle(color: c.ink, fontSize: 15),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

@@ -197,7 +197,14 @@ Future<List<_PendingSyncItem>> _loadPendingItems(String userId) async {
     AppDb.instance.getDirtyTransactionDetails(userId),
     AppDb.instance.getPendingConsumables(userId),
     AppDb.instance.getPendingInvestments(userId),
+    AppDb.instance.getPendingSpendingGroups(userId),
+    AppDb.instance.getPendingGroupMembers(userId),
+    AppDb.instance.getPendingGroupStatusChanges(userId),
+    AppDb.instance.getSpendingGroups(userId),
   ]);
+  final groupNames = {
+    for (final group in results[18] as List<SpendingGroup>) group.id: group.name,
+  };
 
   final items = <_PendingSyncItem>[
     for (final item in results[0] as List<Source>)
@@ -331,6 +338,33 @@ Future<List<_PendingSyncItem>> _loadPendingItems(String userId) async {
         timestamp: item.updatedAt,
         action: 'Create',
         icon: Icons.trending_up_rounded,
+      ),
+    for (final item in results[15] as List<SpendingGroup>)
+      _PendingSyncItem(
+        group: 'Group Spendings',
+        title: item.name,
+        subtitle: 'Spending group',
+        timestamp: item.createdDate,
+        action: 'Create',
+        icon: Icons.groups_outlined,
+      ),
+    for (final item in results[16] as List<GroupMember>)
+      _PendingSyncItem(
+        group: 'Group Spendings',
+        title: item.username,
+        subtitle: 'Member of ${groupNames[item.groupId] ?? 'group'}',
+        timestamp: item.addedDate,
+        action: 'Create',
+        icon: Icons.person_add_alt_outlined,
+      ),
+    for (final item in results[17] as List<GroupStatusChange>)
+      _PendingSyncItem(
+        group: 'Group Spendings',
+        title: groupNames[item.groupId] ?? 'Group',
+        subtitle: item.isActive ? 'Switched on' : 'Switched off',
+        timestamp: item.changedAt,
+        action: 'Update',
+        icon: Icons.toggle_on_outlined,
       ),
   ];
 
