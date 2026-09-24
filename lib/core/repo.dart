@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:uuid/uuid.dart';
 import 'db.dart';
 import 'config.dart';
+import 'group_service.dart';
 import 'models.dart';
+import 'proof_service.dart';
 import 'remote_api.dart';
 import 'sync.dart';
 
@@ -282,12 +285,16 @@ class Repo {
       AppDb.instance.getGroupMembers(userId),
       AppDb.instance.getGroupStatusChanges(userId),
       AppDb.instance.getGroupTransactions(userId),
+      AppDb.instance.getGroupCategories(userId),
+      AppDb.instance.getDisplayNames(),
     ]);
     return data.withGroups(
       spendingGroups: results[0] as List<SpendingGroup>,
       groupMembers: results[1] as List<GroupMember>,
       groupStatusChanges: results[2] as List<GroupStatusChange>,
       groupTransactions: results[3] as List<GroupTransaction>,
+      groupCategories: results[4] as List<GroupCategory>,
+      displayNames: results[5] as Map<String, String>,
     );
   }
 
@@ -380,6 +387,7 @@ class Repo {
     List<GroupMember>? fetchedGroupMembers;
     List<GroupStatusChange>? fetchedGroupStatusChanges;
     List<GroupTransaction>? fetchedGroupTransactions;
+    List<GroupCategory>? fetchedGroupCategories;
     try {
       final rawGroups = await api.getSpendingGroups();
       List<Map<String, dynamic>> nested(Map<String, dynamic> g, String key) =>
@@ -398,6 +406,22 @@ class Repo {
       fetchedGroupTransactions = (await api.getGroupTransactions())
           .map(GroupTransaction.fromApi)
           .toList();
+      try {
+        fetchedGroupCategories = (await api.getGroupCategories())
+            .map(GroupCategory.fromApi)
+            .toList();
+      } catch (_) {
+        // An API older than group categories: keep the cached copy.
+        fetchedGroupCategories = null;
+      }
+      // Keep the device copy of group routines / planned expenses fresh, so
+      // they can be read offline later. Best-effort: the saved copy stays.
+      try {
+        await GroupService.instance.refreshPlans(api, cfg.userId);
+      } catch (_) {}
+      try {
+        await GroupService.instance.refreshFundRequests(api, cfg.userId);
+      } catch (_) {}
     } catch (_) {
       fetchedGroups = null;
       fetchedGroupMembers = null;
@@ -412,6 +436,23 @@ class Repo {
         await AppDb.instance.getGroupStatusChanges(cfg.userId);
     final groupTransactions = fetchedGroupTransactions ??
         await AppDb.instance.getGroupTransactions(cfg.userId);
+    final groupCategories = fetchedGroupCategories ??
+        await AppDb.instance.getGroupCategories(cfg.userId);
+
+    // Members are shown by their display name. Looked up best-effort; on
+    // failure the cached names (or plain usernames) are used.
+    final memberNames = {
+      for (final m in groupMembers) m.username.toLowerCase(),
+      for (final g in spendingGroups) g.leader.toLowerCase(),
+    }..remove('');
+    if (memberNames.isNotEmpty) {
+      try {
+        final names = await api.getDisplayNames(memberNames.toList());
+        await AppDb.instance.putDisplayNames(memberNames, names);
+      } catch (_) {
+        // login-api older than display names, or unreachable.
+      }
+    }
 
     String? transferCategoryName;
     try {
@@ -528,6 +569,7 @@ class Repo {
       groupMembers: groupMembers,
       groupStatusChanges: groupStatusChanges,
       groupTransactions: groupTransactions,
+      groupCategories: groupCategories,
       insulinItems: insulinItems,
       insulinAssigns: insulinAssigns,
       insulinUsages: insulinUsages,
@@ -660,6 +702,7 @@ class Repo {
         .replaceGroupStatusChanges(data.groupStatusChanges, userId);
     await AppDb.instance
         .replaceGroupTransactions(data.groupTransactions, userId);
+    await AppDb.instance.replaceGroupCategories(data.groupCategories, userId);
     await AppDb.instance.replaceInsulinItems(data.insulinItems, userId);
     await AppDb.instance.replaceInsulinAssigns(data.insulinAssigns, userId);
     await AppDb.instance.replaceInsulinUsages(data.insulinUsages, userId);
@@ -770,20 +813,27 @@ class Repo {
   // sent to the server immediately. Other failures (e.g. validation errors
   // from a reachable server) are thrown as [ApiException] as before.
 
+  ///
+  /// [proof] is an already-compressed proof image. It is uploaded against
+  /// the new earning, or kept until the earning (and the device) reach the
+  /// server - the transaction itself never fails because of it.
   Future<bool> createEarning({
     required double amount,
     required String description,
     required Category category,
     required Source source,
     String? groupId,
+    Uint8List? proof,
   }) async {
     // Stamped once, before the API is even tried, so the transaction carries
     // the moment it was entered whichever branch it takes.
     final enteredAt = _nowGmtPlus7Iso();
 
     Future<bool> savePending() async {
+      final localId = _uuid.v4();
+      await _queuePendingProof(ProofRef.earning, localId, proof);
       await _queuePending(Transaction(
-        id: _uuid.v4(),
+        id: localId,
         type: 'earning',
         amount: amount,
         description: description,
@@ -806,16 +856,18 @@ class Repo {
     if (groupId != null) await syncPendingGroupWrites();
 
     try {
-      await _withTokenRefresh(() => RemoteApi(_cfg).createEarning(
-            totalAmount: amount,
-            description: description,
-            earningCategoryId: category.id,
-            earningCategory: category.name,
-            sourceId: source.id,
-            source: source.name,
-            createdDate: enteredAt,
-            groupId: groupId,
-          ));
+      final created =
+          await _withTokenRefresh(() => RemoteApi(_cfg).createEarning(
+                totalAmount: amount,
+                description: description,
+                earningCategoryId: category.id,
+                earningCategory: category.name,
+                sourceId: source.id,
+                source: source.name,
+                createdDate: enteredAt,
+                groupId: groupId,
+              ));
+      await _attachProof(ProofRef.earning, created['earning_id'], proof);
       return false;
     } on ApiUnavailableException {
       return savePending();
@@ -827,7 +879,7 @@ class Repo {
   /// receipt scanner pre-fills from a recognised price list.
   ///
   /// Returns `true` when the API was unreachable and the transaction (with its
-  /// details) was queued locally instead.
+  /// details) was queued locally instead. See [createEarning] for [proof].
   Future<bool> createSpending({
     required double amount,
     required String description,
@@ -835,11 +887,13 @@ class Repo {
     required Source source,
     List<TransactionDetail> details = const [],
     String? groupId,
+    Uint8List? proof,
   }) async {
     final enteredAt = _nowGmtPlus7Iso();
 
     Future<bool> savePending() async {
       final localId = _uuid.v4();
+      await _queuePendingProof(ProofRef.spending, localId, proof);
       await _queuePending(Transaction(
         id: localId,
         type: 'spending',
@@ -864,20 +918,42 @@ class Repo {
     if (groupId != null) await syncPendingGroupWrites();
 
     try {
-      await _withTokenRefresh(() => RemoteApi(_cfg).createSpending(
-            totalAmount: amount,
-            description: description,
-            spendingCategoryId: category.id,
-            spendingCategory: category.name,
-            sourceId: source.id,
-            source: source.name,
-            details: details.map((d) => d.toApiPayload()).toList(),
-            createdDate: enteredAt,
-            groupId: groupId,
-          ));
+      final created =
+          await _withTokenRefresh(() => RemoteApi(_cfg).createSpending(
+                totalAmount: amount,
+                description: description,
+                spendingCategoryId: category.id,
+                spendingCategory: category.name,
+                sourceId: source.id,
+                source: source.name,
+                details: details.map((d) => d.toApiPayload()).toList(),
+                createdDate: enteredAt,
+                groupId: groupId,
+              ));
+      await _attachProof(ProofRef.spending, created['spending_id'], proof);
       return false;
     } on ApiUnavailableException {
       return savePending();
+    }
+  }
+
+  /// Keeps [proof] for a transaction queued offline as [localId]; the sync
+  /// uploads it once the transaction has its server id.
+  Future<void> _queuePendingProof(
+      ProofRef ref, String localId, Uint8List? proof) async {
+    if (proof == null) return;
+    await ProofService.instance.queueForLocalTransaction(ref, localId, proof);
+  }
+
+  /// Uploads [proof] for a transaction the server just created as [id]. A
+  /// failed upload is queued for the next sync instead of failing the save.
+  Future<void> _attachProof(ProofRef ref, Object? id, Uint8List? proof) async {
+    final refId = id?.toString() ?? '';
+    if (proof == null || refId.isEmpty) return;
+    try {
+      await ProofService.instance.uploadOrQueue(ref, refId, proof);
+    } catch (_) {
+      await ProofService.instance.queue(ref, refId, proof);
     }
   }
 
@@ -961,17 +1037,21 @@ class Repo {
 
   /// Creates a transfer as a paired spending (fromSource) + earning
   /// (toSource), both tagged with the server's configured Transfer category.
+  /// A [proof] goes on the spending half.
   Future<bool> createTransfer({
     required double amount,
     required String description,
     required Source fromSource,
     required Source toSource,
+    Uint8List? proof,
   }) async {
     final enteredAt = _nowGmtPlus7Iso();
 
     Future<bool> savePending() async {
+      final localId = _uuid.v4();
+      await _queuePendingProof(ProofRef.spending, localId, proof);
       await _queuePending(Transaction(
-        id: _uuid.v4(),
+        id: localId,
         type: 'transfer',
         amount: amount,
         description: description,
@@ -987,6 +1067,7 @@ class Repo {
     // See [createEarning]: offline means queue now, don't wait on a request.
     if (!SyncService.instance.isOnline) return savePending();
 
+    String? spendingId;
     try {
       await _withTokenRefresh(() async {
         final remote = RemoteApi(_cfg);
@@ -1007,7 +1088,7 @@ class Repo {
         }
         // Both halves carry the same stamp, which is also what keeps
         // [_pairTransfers] recombining them into one transfer on read.
-        await remote.createSpending(
+        final spent = await remote.createSpending(
           totalAmount: amount,
           description: description,
           spendingCategoryId: catId,
@@ -1016,6 +1097,7 @@ class Repo {
           source: fromSource.name,
           createdDate: enteredAt,
         );
+        spendingId = '${spent['spending_id'] ?? ''}';
         await remote.createEarning(
           totalAmount: amount,
           description: description,
@@ -1026,6 +1108,7 @@ class Repo {
           createdDate: enteredAt,
         );
       });
+      await _attachProof(ProofRef.spending, spendingId, proof);
       return false;
     } on ApiUnavailableException {
       return savePending();
@@ -2244,18 +2327,39 @@ class Repo {
     final remote = RemoteApi(cfg);
     final sources = await AppDb.instance.getSources(cfg.userId);
     final categories = await AppDb.instance.getCategories(cfg.userId);
+    final groupCategories =
+        await AppDb.instance.getGroupCategories(cfg.userId);
+
+    /// A queued group transaction was filed under one of its group's
+    /// categories; anything else under the user's own.
+    ({String id, String name}) categoryFor(Transaction t) {
+      final groupCategory = t.groupId == null
+          ? null
+          : groupCategories
+              .where((c) =>
+                  c.groupId == t.groupId &&
+                  c.kind == t.type &&
+                  c.name == t.category)
+              .firstOrNull;
+      if (groupCategory != null) {
+        return (id: groupCategory.id, name: groupCategory.name);
+      }
+      final cat = categories
+          .firstWhere((c) => c.kind == t.type && c.name == t.category);
+      return (id: cat.id, name: cat.name);
+    }
 
     // Every push carries `t.date` - the moment the transaction was entered on
     // the device - so the server stores that instead of stamping the row with
     // the time sync happened to run.
     for (final t in pending) {
+      var serverId = '';
       try {
         switch (t.type) {
           case 'earning':
-            final cat = categories
-                .firstWhere((c) => c.kind == 'earning' && c.name == t.category);
+            final cat = categoryFor(t);
             final src = sources.firstWhere((s) => s.name == t.source);
-            await remote.createEarning(
+            final created = await remote.createEarning(
               totalAmount: t.amount,
               description: t.description,
               earningCategoryId: cat.id,
@@ -2265,16 +2369,16 @@ class Repo {
               createdDate: t.date,
               groupId: t.groupId,
             );
+            serverId = '${created['earning_id'] ?? ''}';
             break;
           case 'spending':
-            final cat = categories.firstWhere(
-                (c) => c.kind == 'spending' && c.name == t.category);
+            final cat = categoryFor(t);
             final src = sources.firstWhere((s) => s.name == t.source);
             // Ship the queued line items along with their parent spending so
             // the server rebuilds the same breakdown under its own ids.
             final queuedDetails =
                 await AppDb.instance.getTransactionDetailsFor(t.id, cfg.userId);
-            await remote.createSpending(
+            final created = await remote.createSpending(
               totalAmount: t.amount,
               description: t.description,
               spendingCategoryId: cat.id,
@@ -2285,6 +2389,7 @@ class Repo {
               createdDate: t.date,
               groupId: t.groupId,
             );
+            serverId = '${created['spending_id'] ?? ''}';
             break;
           case 'transfer':
             final from = sources.firstWhere((s) => s.name == t.fromSource);
@@ -2304,7 +2409,7 @@ class Repo {
               throw const ApiException(
                   'Transfer category is not configured on the server.');
             }
-            await remote.createSpending(
+            final spent = await remote.createSpending(
               totalAmount: t.amount,
               description: t.description,
               spendingCategoryId: catId,
@@ -2313,6 +2418,7 @@ class Repo {
               source: from.name,
               createdDate: t.date,
             );
+            serverId = '${spent['spending_id'] ?? ''}';
             await remote.createEarning(
               totalAmount: t.amount,
               description: t.description,
@@ -2323,6 +2429,11 @@ class Repo {
               createdDate: t.date,
             );
             break;
+        }
+        // Its proof photos can now go up against the server's id.
+        if (serverId.isNotEmpty) {
+          await AppDb.instance
+              .resolvePendingProofs(t.id, serverId, cfg.userId);
         }
         await AppDb.instance.deleteTransaction(t.id, cfg.userId);
       } on ApiUnavailableException {

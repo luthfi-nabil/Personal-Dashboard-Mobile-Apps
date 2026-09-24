@@ -8,6 +8,8 @@ import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
 import 'db.dart';
+import 'group_models.dart';
+import 'group_service.dart';
 import 'models.dart';
 import 'routine_schedule.dart';
 import 'utils.dart';
@@ -197,6 +199,41 @@ class NotificationService {
         );
         slot++;
       }
+
+      // Group routines, from the copy of the group plans saved on the
+      // device: reminded on the first day of their period (the 1st of the
+      // month for a monthly one), then daily while nobody has paid.
+      final plans = await GroupService.instance.cachedPlans(config.userId);
+      final groupDue = [
+        for (final r in plans?.routines ?? const <GroupRoutine>[])
+          (
+            routine: r,
+            due: periodDueDate(
+                reminder: r.reminder,
+                lastPaidAt: r.lastPaidAt,
+                createdDate: r.createdDate,
+                today: at),
+          ),
+      ]..sort((a, b) => a.due.compareTo(b.due));
+      final room = _maxScheduled - schedule.length;
+      final groupSchedule = groupDue.take(room < 0 ? 0 : room).toList();
+      await _saveSlotCount(schedule.length + groupSchedule.length);
+      for (final item in groupSchedule) {
+        final overdue = item.due.isBefore(dateOnly(at));
+        await _schedule(
+          id: _idBase + slot,
+          fireAt: periodReminderFireTime(item.due,
+              now: at,
+              hour: config.reminderHour,
+              minute: config.reminderMinute),
+          title: '${overdue ? 'Overdue' : 'Due'}: ${item.routine.itemName}',
+          body: '${fmtRp(item.routine.price, config.currency)} - group '
+              'routine, ${reminderLabel(item.routine.reminder)} (due '
+              '${item.due.day}/${item.due.month})',
+          payload: 'group-routine:${item.routine.groupId}',
+        );
+        slot++;
+      }
     } catch (error, stack) {
       debugPrint('Reminder scheduling failed: $error\n$stack');
     }
@@ -261,8 +298,9 @@ class NotificationService {
     await prefs.setInt(_slotCountKey, count);
   }
 
-  String _titleFor(RoutineDue due, DateTime now) =>
-      due.isOverdue(now) ? 'Overdue: ${due.routine.itemName}' : 'Due: ${due.routine.itemName}';
+  String _titleFor(RoutineDue due, DateTime now) => due.isOverdue(now)
+      ? 'Overdue: ${due.routine.itemName}'
+      : 'Due: ${due.routine.itemName}';
 
   String _bodyFor(RoutineDue due, DateTime now, String currency) {
     final amount = fmtRp(due.routine.price, currency);

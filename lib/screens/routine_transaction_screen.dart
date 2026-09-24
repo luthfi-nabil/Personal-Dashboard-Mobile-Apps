@@ -1,15 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/db.dart';
 import '../core/models.dart';
+import '../core/money_input.dart';
 import '../core/notifications.dart';
 import '../core/repo.dart';
 import '../core/routine_schedule.dart';
 import '../core/utils.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
+import '../widgets/routine_widgets.dart';
 
 class RoutineTransactionScreen extends ConsumerWidget {
   const RoutineTransactionScreen({super.key});
@@ -42,11 +43,11 @@ class RoutineTransactionScreen extends ConsumerWidget {
             .where((p) => isoMonth(p.boughtAt) == currentMonth)
             .map((p) => p.routineId)
             .toSet();
-        final unpaidThisMonth = active
-            .where((item) =>
-                item.reminder == 'monthly' &&
-                !paidRoutineIdsThisMonth.contains(item.id))
-            .toList();
+        final today = DateTime.now();
+        // Not paid within its own current period (this month for a monthly
+        // routine, this year for a yearly one, ...).
+        final unpaidThisPeriod =
+            active.where((item) => !_isPaid(item, today)).toList();
         // What is still owed this month: the share of the monthly estimate
         // belonging to routines that have not been paid yet. Anything already
         // paid this month contributes nothing, so this counts down to zero as
@@ -87,13 +88,13 @@ class RoutineTransactionScreen extends ConsumerWidget {
               c: c,
             ),
             const SizedBox(height: 20),
-            _SectionTitle(
-                'Not paid yet this month (${unpaidThisMonth.length})', c),
+            _SectionTitle('Not paid yet (${unpaidThisPeriod.length})', c),
             const SizedBox(height: 10),
-            if (unpaidThisMonth.isEmpty)
-              _EmptyPanel(c: c, text: 'All monthly routines paid this month.')
+            if (unpaidThisPeriod.isEmpty)
+              _EmptyPanel(
+                  c: c, text: 'Every routine is paid for its current period.')
             else
-              ...unpaidThisMonth.map((item) => _UnpaidCard(
+              ...unpaidThisPeriod.map((item) => _UnpaidCard(
                     item: item,
                     currency: cfg.currency,
                     c: c,
@@ -108,6 +109,7 @@ class RoutineTransactionScreen extends ConsumerWidget {
                     item: item,
                     currency: cfg.currency,
                     c: c,
+                    paid: _isPaid(item, today),
                     remindersOn: cfg.remindersEnabled,
                     muted: muted.contains(item.id),
                     onBought: () => _openBoughtDialog(context, ref, item, data),
@@ -194,18 +196,23 @@ class RoutineTransactionScreen extends ConsumerWidget {
   }
 }
 
-double _monthlyEstimate(RoutineTransaction item) => switch (item.reminder) {
-      'weekly' => item.price * 4,
-      'bi-monthly' => item.price / 2,
-      'quarterly' => item.price / 3,
-      'yearly' => item.price / 12,
-      _ => item.price,
-    };
+double _monthlyEstimate(RoutineTransaction item) =>
+    monthlyEstimate(item.price, item.reminder);
+
+/// Paid within the routine's current period; resets when the next one
+/// starts (see [currentPeriodStart]).
+bool _isPaid(RoutineTransaction item, DateTime today) => isPaidThisPeriod(
+      reminder: item.reminder,
+      lastPaidAt: item.lastBoughtAt,
+      createdDate: item.createdDate,
+      today: today,
+    );
 
 String _reminderSummary(List<RoutineTransaction> items) {
   final counts = <String, int>{};
   for (final item in items) {
-    counts[item.reminder] = (counts[item.reminder] ?? 0) + 1;
+    final label = isCustomReminder(item.reminder) ? 'custom' : item.reminder;
+    counts[label] = (counts[label] ?? 0) + 1;
   }
   if (counts.isEmpty) return 'None';
   final entries = counts.entries.toList()
@@ -352,6 +359,9 @@ class _RoutineCard extends StatelessWidget {
   final String currency;
   final AppColors c;
 
+  /// Paid within the current period (see [_isPaid]).
+  final bool paid;
+
   /// Whether reminders are on at all. When they are off there is nothing to
   /// mute, so the per-routine control and the muted badge are hidden.
   final bool remindersOn;
@@ -364,6 +374,7 @@ class _RoutineCard extends StatelessWidget {
     required this.item,
     required this.currency,
     required this.c,
+    required this.paid,
     required this.remindersOn,
     required this.muted,
     required this.onBought,
@@ -403,10 +414,14 @@ class _RoutineCard extends StatelessWidget {
                       Icon(Icons.notifications_off_outlined,
                           size: 14, color: c.muted),
                     ],
+                    const SizedBox(width: 8),
+                    PaidStatusChip(paid: paid, c: c),
                   ],
                 ),
                 const SizedBox(height: 4),
-                Text('${fmtRp(item.price, currency)} - ${item.reminder}',
+                Text(
+                    '${fmtRp(item.price, currency)} - '
+                    '${reminderLabel(item.reminder)}',
                     style: TextStyle(color: c.muted, fontSize: 12)),
                 Text(item.categoryName,
                     style: TextStyle(color: c.accent, fontSize: 12)),
@@ -582,7 +597,7 @@ class _RoutineEditorSheetState extends ConsumerState<_RoutineEditorSheet> {
 
   Future<void> _save() async {
     final name = _nameCtl.text.trim();
-    final price = double.tryParse(_priceCtl.text.replaceAll(',', '.')) ?? 0;
+    final price = parseMoney(_priceCtl.text) ?? 0;
     final cats = widget.data.categories.where((cat) => cat.kind == 'spending');
     if (name.isEmpty || price <= 0 || _category.isEmpty) return;
     final category = cats.firstWhere((cat) => cat.name == _category);
@@ -628,29 +643,18 @@ class _RoutineEditorSheetState extends ConsumerState<_RoutineEditorSheet> {
               controller: _priceCtl,
               keyboardType:
                   const TextInputType.numberWithOptions(decimal: true),
-              inputFormatters: [
-                FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
-              ],
+              inputFormatters: moneyInputFormatters,
               style: TextStyle(color: c.ink, fontSize: 15),
               decoration: _fieldDecoration(c, 'Price'),
             ),
             const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: _reminder,
-              decoration: _fieldDecoration(c, 'Date reminder'),
+            RepeatPicker(
+              initial: _reminder,
+              label: 'Date reminder',
+              decoration: (label) => _fieldDecoration(c, label),
               dropdownColor: c.surface,
               style: TextStyle(color: c.ink, fontSize: 15),
-              items: const [
-                DropdownMenuItem(value: 'weekly', child: Text('weekly')),
-                DropdownMenuItem(value: 'monthly', child: Text('monthly')),
-                DropdownMenuItem(
-                    value: 'bi-monthly', child: Text('bi-monthly')),
-                DropdownMenuItem(value: 'quarterly', child: Text('quarterly')),
-                DropdownMenuItem(value: 'yearly', child: Text('yearly')),
-              ],
-              onChanged: (v) {
-                if (v != null) setState(() => _reminder = v);
-              },
+              onChanged: (v) => setState(() => _reminder = v),
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
@@ -712,12 +716,10 @@ Future<void> _openBoughtDialog(
                 controller: priceCtl,
                 keyboardType:
                     const TextInputType.numberWithOptions(decimal: true),
-                inputFormatters: [
-                  FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
-                ],
+                inputFormatters: moneyInputFormatters,
                 decoration: InputDecoration(
                   labelText: 'Final price',
-                  hintText: item.price.toStringAsFixed(0),
+                  hintText: formatMoneyInput(item.price),
                 ),
                 style: TextStyle(color: AppTheme.colorsOf(context).ink),
               ),
@@ -753,7 +755,7 @@ Future<void> _openBoughtDialog(
   );
   if (result != true) return;
   final price =
-      double.tryParse(priceCtl.text.replaceAll(',', '.')) ?? item.price;
+      parseMoney(priceCtl.text) ?? item.price;
   final source = data.sources.firstWhere((s) => s.name == sourceName);
   final savedLocally = await Repo.instance
       .confirmRoutineBought(routine: item, price: price, source: source);

@@ -18,9 +18,11 @@ import 'screens/options_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/activities_screen.dart';
 import 'screens/consumables_screen.dart';
-import 'screens/group_balance_screen.dart';
+import 'screens/group_funds_screen.dart';
+import 'screens/group_target_screen.dart';
 import 'screens/group_plans_screen.dart';
 import 'screens/group_spendings_screen.dart';
+import 'screens/group_transaction_screen.dart';
 import 'screens/planned_expense_screen.dart';
 import 'screens/routine_transaction_screen.dart';
 import 'screens/insulin_shell.dart';
@@ -50,7 +52,9 @@ final _router = GoRouter(
     if (!cfg.isLoggedIn && !isAuthRoute) {
       return '/login';
     }
-    if (cfg.isLoggedIn && loc == '/login') {
+    // `/login?add=1` signs in one more account while another is active.
+    final addingAccount = state.uri.queryParameters['add'] == '1';
+    if (cfg.isLoggedIn && loc == '/login' && !addingAccount) {
       return '/';
     }
     // Diabetic screens stay routable only while the Health extra feature is
@@ -64,7 +68,8 @@ final _router = GoRouter(
   routes: [
     GoRoute(
       path: '/login',
-      builder: (c, s) => const LoginScreen(),
+      builder: (c, s) =>
+          LoginScreen(addAccount: s.uri.queryParameters['add'] == '1'),
     ),
     GoRoute(
       path: '/server-settings',
@@ -181,8 +186,20 @@ final _router = GoRouter(
     ),
     GoRoute(
       parentNavigatorKey: _rootKey,
-      path: '/group-spendings/:id/balance',
-      builder: (c, s) => GroupBalanceScreen(groupId: s.pathParameters['id']!),
+      path: '/group-spendings/:id/funds',
+      builder: (c, s) => GroupFundsScreen(groupId: s.pathParameters['id']!),
+    ),
+    GoRoute(
+      parentNavigatorKey: _rootKey,
+      path: '/group-spendings/:id/targets',
+      builder: (c, s) => GroupTargetScreen(groupId: s.pathParameters['id']!),
+    ),
+    GoRoute(
+      parentNavigatorKey: _rootKey,
+      path: '/group-spendings/:id/txn/:txnId',
+      builder: (c, s) => GroupTransactionScreen(
+          groupId: s.pathParameters['id']!,
+          transactionId: s.pathParameters['txnId']!),
     ),
     GoRoute(
       parentNavigatorKey: _rootKey,
@@ -273,7 +290,16 @@ class _PersonalDashboardAppState extends ConsumerState<PersonalDashboardApp>
   }
 
   void _openRoutines(String? payload) {
-    if (payload == null || !payload.startsWith('routine')) return;
+    if (payload == null) return;
+    // `group-routine:<groupId>` opens that group's recap, where the due
+    // routines are listed.
+    if (payload.startsWith('group-routine:')) {
+      _router.go('/group-spendings');
+      _router.push(
+          '/group-spendings/${payload.substring('group-routine:'.length)}');
+      return;
+    }
+    if (!payload.startsWith('routine')) return;
     _router.go('/routine-transactions');
   }
 

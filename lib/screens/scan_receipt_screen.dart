@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 
 import '../core/image_crop.dart';
 import '../core/models.dart';
+import '../core/money_input.dart';
 import '../core/receipt_scanner.dart';
 import '../core/utils.dart';
 import '../providers/providers.dart';
@@ -50,6 +51,9 @@ class _ScanReceiptScreenState extends ConsumerState<ScanReceiptScreen> {
   /// Selected region in 0..1 image coordinates, reused as the crop screen's
   /// starting rectangle on every subsequent adjustment.
   Rect? _cropRect;
+
+  /// Send the bill's photo along as the new transaction's proof.
+  bool _attachPhoto = true;
 
   @override
   void dispose() {
@@ -170,7 +174,7 @@ class _ScanReceiptScreenState extends ConsumerState<ScanReceiptScreen> {
     });
   }
 
-  void _confirm() {
+  Future<void> _confirm() async {
     final selected = _items.where((item) => item.selected).toList();
     if (selected.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -192,11 +196,15 @@ class _ScanReceiptScreenState extends ConsumerState<ScanReceiptScreen> {
             ))
         .toList();
 
+    // The whole photo, not the crop: it is the better proof of the bill.
+    final photo = _attachPhoto ? _sourceImage : null;
     final draft = AddTransactionDraft(
       details: details,
       description: _suggestDescription(details),
       amount: _selectedTotal,
+      receiptPhoto: photo == null ? null : await photo.readAsBytes(),
     );
+    if (!mounted) return;
 
     final target = widget.returnPath == null || widget.returnPath!.isEmpty
         ? '/add'
@@ -334,6 +342,19 @@ class _ScanReceiptScreenState extends ConsumerState<ScanReceiptScreen> {
                       c: c,
                       onTap: _adjustAreaAndRescan,
                     ),
+                    if (_sourceImage != null)
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        value: _attachPhoto,
+                        onChanged: (v) => setState(() => _attachPhoto = v),
+                        title: Text('Upload the bill as proof',
+                            style: TextStyle(color: c.ink, fontSize: 14)),
+                        subtitle: Text(
+                          'The photo is compressed and attached to the '
+                          'transaction when you save it.',
+                          style: TextStyle(color: c.muted, fontSize: 12),
+                        ),
+                      ),
                   ],
                   if (_items.isNotEmpty) ...[
                     const SizedBox(height: 18),
@@ -437,7 +458,7 @@ class _EditableItem {
   factory _EditableItem.fromScan(ScannedItem item) => _EditableItem(
         nameCtl: TextEditingController(text: item.name),
         qtyCtl: TextEditingController(text: _trimNumber(item.quantity)),
-        amountCtl: TextEditingController(text: _trimNumber(item.amount)),
+        amountCtl: TextEditingController(text: formatMoneyInput(item.amount)),
         sourceLine: item.sourceLine,
         isCharge: item.isCharge,
       );
@@ -456,8 +477,7 @@ class _EditableItem {
     return parsed <= 0 ? 1 : parsed;
   }
 
-  double get amount =>
-      double.tryParse(amountCtl.text.replaceAll(',', '.')) ?? 0;
+  double get amount => parseMoney(amountCtl.text) ?? 0;
 
   double get unitPrice => quantity == 0 ? amount : amount / quantity;
 
@@ -647,6 +667,7 @@ class _ItemCard extends StatelessWidget {
                     child: _MiniField(
                       controller: item.amountCtl,
                       label: 'Amount',
+                      money: true,
                       c: c,
                       onChanged: onChanged,
                     ),
@@ -706,11 +727,15 @@ class _MiniField extends StatelessWidget {
   final AppColors c;
   final VoidCallback onChanged;
 
+  /// A money amount: grouped with dots as it is typed.
+  final bool money;
+
   const _MiniField({
     required this.controller,
     required this.label,
     required this.c,
     required this.onChanged,
+    this.money = false,
   });
 
   @override
@@ -718,7 +743,9 @@ class _MiniField extends StatelessWidget {
     return TextField(
       controller: controller,
       keyboardType: const TextInputType.numberWithOptions(decimal: true),
-      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
+      inputFormatters: money
+          ? moneyInputFormatters
+          : [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
       style: TextStyle(fontSize: 14, color: c.ink),
       decoration: InputDecoration(
         isDense: true,

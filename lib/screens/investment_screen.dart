@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/metal_price.dart';
 import '../core/models.dart';
+import '../core/money_input.dart';
 import '../core/repo.dart';
 import '../core/utils.dart';
 import '../providers/providers.dart';
@@ -199,7 +200,9 @@ class _InvestmentScreenState extends ConsumerState<InvestmentScreen> {
   /// holding gets revalued, and the manual override for a metal one.
   Future<void> _promptUnitPrice(Investment item) async {
     final controller = TextEditingController(
-      text: item.lastUnitPrice > 0 ? _plainNumber(item.lastUnitPrice) : '',
+      text: item.lastUnitPrice > 0
+          ? formatMoneyInput(item.lastUnitPrice, decimals: 4)
+          : '',
     );
     final c = AppTheme.colorsOf(context);
     final priceLabel = switch (item.kind) {
@@ -235,9 +238,7 @@ class _InvestmentScreenState extends ConsumerState<InvestmentScreen> {
               autofocus: true,
               keyboardType:
                   const TextInputType.numberWithOptions(decimal: true),
-              inputFormatters: [
-                FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
-              ],
+              inputFormatters: const [MoneyInputFormatter(decimals: 4)],
               decoration: _fieldDecoration(c, priceLabel),
             ),
           ],
@@ -248,7 +249,7 @@ class _InvestmentScreenState extends ConsumerState<InvestmentScreen> {
               child: const Text('Cancel')),
           TextButton(
             onPressed: () => Navigator.pop(
-                dialogContext, _parseNumber(controller.text)),
+                dialogContext, parseMoney(controller.text)),
             child: const Text('Save'),
           ),
         ],
@@ -815,7 +816,9 @@ class _InvestmentEditorSheetState extends State<_InvestmentEditorSheet> {
     _unitsCtl = TextEditingController(
         text: existing == null ? '' : _plainNumber(existing.units));
     _priceCtl = TextEditingController(
-        text: existing == null ? '' : _plainNumber(existing.buyUnitPrice));
+        text: existing == null
+            ? ''
+            : formatMoneyInput(existing.buyUnitPrice, decimals: 4));
     _notesCtl = TextEditingController(text: existing?.notes ?? '');
     _acquired = DateTime.tryParse(existing?.acquiredDate ?? '') ??
         DateTime.now();
@@ -858,7 +861,7 @@ class _InvestmentEditorSheetState extends State<_InvestmentEditorSheet> {
         name: name,
         provider: _providerCtl.text.trim(),
         units: units,
-        buyUnitPrice: _parseNumber(_priceCtl.text) ?? 0,
+        buyUnitPrice: parseMoney(_priceCtl.text) ?? 0,
         notes: _notesCtl.text.trim(),
         acquiredDate: _acquired.toIso8601String(),
       ),
@@ -973,9 +976,7 @@ class _InvestmentEditorSheetState extends State<_InvestmentEditorSheet> {
                       controller: _priceCtl,
                       keyboardType:
                           const TextInputType.numberWithOptions(decimal: true),
-                      inputFormatters: [
-                        FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
-                      ],
+                      inputFormatters: const [MoneyInputFormatter(decimals: 4)],
                       style: TextStyle(fontSize: 15, color: c.ink),
                       decoration: _fieldDecoration(
                           c,

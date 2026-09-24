@@ -5,11 +5,13 @@ import '../core/background_sync.dart';
 import '../core/config.dart';
 import '../core/db.dart';
 import '../core/notifications.dart';
+import '../core/remote_api.dart';
 import '../core/features.dart';
 import '../core/models.dart';
 import '../core/seed.dart';
 import '../core/sync.dart';
 import '../theme/app_theme.dart';
+import '../widgets/account_switcher.dart';
 import '../widgets/app_update_widgets.dart';
 import '../providers/providers.dart';
 import 'dart:convert';
@@ -30,8 +32,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Log out?'),
-        content:
-            const Text("You'll need to sign in again to sync with the server."),
+        content: Text(ConfigService.instance.accounts.length > 1
+            ? 'This account is signed out of this device and the next '
+                'signed-in account is opened. Its data stays on the server.'
+            : "You'll need to sign in again to sync with the server."),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
@@ -48,7 +52,53 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     // Explicitly replace the shell route after clearing the session. The
     // router redirect remains a fallback for expiry and API-triggered logout.
-    context.go('/login');
+    // With another account still signed in, that one is now active.
+    context.go(ConfigService.instance.current.isLoggedIn ? '/' : '/login');
+  }
+
+  /// Sets the display name other group members see instead of the username.
+  Future<void> _editFullName(AppConfig cfg) async {
+    final ctl = TextEditingController(text: cfg.fullName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Full name / alias'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: InputDecoration(
+            hintText: cfg.username,
+            helperText: 'Shown to your group members. Leave empty to use '
+                'your username.',
+            helperMaxLines: 2,
+          ),
+          onSubmitted: (v) => Navigator.pop(dialogContext, v),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, ctl.text),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    ctl.dispose();
+    if (name == null || name.trim() == cfg.fullName.trim()) return;
+    try {
+      await ConfigService.instance.updateFullName(name);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Name updated')));
+      // Group screens read names from the synced data.
+      await ref.read(appDataProvider.notifier).refresh();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    }
   }
 
   /// Writes the flag locally (always succeeds, online or not) and lets
@@ -153,8 +203,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             color: c.ink,
                             borderRadius: BorderRadius.circular(12)),
                         child: Text(
-                          cfg.username.isNotEmpty
-                              ? cfg.username[0].toUpperCase()
+                          cfg.displayName.isNotEmpty
+                              ? cfg.displayName[0].toUpperCase()
                               : '?',
                           style: TextStyle(
                               color: c.bg,
@@ -168,13 +218,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                                cfg.username.isEmpty
+                                cfg.displayName.isEmpty
                                     ? 'Signed in'
-                                    : cfg.username,
+                                    : cfg.displayName,
                                 style: TextStyle(
                                     color: c.ink,
                                     fontSize: 15,
                                     fontWeight: FontWeight.w600)),
+                            if (cfg.fullName.trim().isNotEmpty)
+                              Text('@${cfg.username}',
+                                  style:
+                                      TextStyle(color: c.muted, fontSize: 12)),
                             if (cfg.email.isNotEmpty)
                               Text(cfg.email,
                                   style:
@@ -188,7 +242,41 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                               Text('Log out', style: TextStyle(color: c.neg))),
                     ],
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 16,
+                    runSpacing: 4,
+                    children: [
+                      TextButton.icon(
+                        onPressed: () => _editFullName(cfg),
+                        icon: Icon(Icons.badge_outlined,
+                            size: 16, color: c.accent),
+                        label: Text(
+                            cfg.fullName.trim().isEmpty
+                                ? 'Set full name'
+                                : 'Edit full name',
+                            style: TextStyle(color: c.accent)),
+                        style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            minimumSize: const Size(0, 32)),
+                      ),
+                      TextButton.icon(
+                        onPressed: () => showAccountSwitcher(context),
+                        icon: Icon(Icons.switch_account_outlined,
+                            size: 16, color: c.accent),
+                        label: Text(
+                            ConfigService.instance.accounts.length > 1
+                                ? 'Switch account '
+                                    '(${ConfigService.instance.accounts.length})'
+                                : 'Add account',
+                            style: TextStyle(color: c.accent)),
+                        style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            minimumSize: const Size(0, 32)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
                   const Divider(height: 1),
                   const SizedBox(height: 12),
                   Row(

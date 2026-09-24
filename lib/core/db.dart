@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:sqflite/sqflite.dart' hide Transaction;
 import 'package:path/path.dart';
 import 'models.dart';
@@ -20,6 +22,8 @@ const _userScopedTables = [
   'spending_group_members',
   'spending_group_status',
   'group_transactions',
+  'group_categories',
+  'group_snapshots',
   'activity_categories',
   'activity_templates',
   'daily_activities',
@@ -59,7 +63,7 @@ class AppDb {
     _db = await factory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 22,
+        version: 25,
         onCreate: (db, _) async {
           await db.execute('''CREATE TABLE sources (
             id TEXT NOT NULL,
@@ -155,6 +159,7 @@ class AppDb {
             value TEXT
           )''');
           await _createPendingDeletesTable(db);
+          await _createPendingProofsTable(db);
           await db.execute('''CREATE TABLE insulin_items (
             id TEXT NOT NULL,
             name TEXT NOT NULL,
@@ -323,6 +328,17 @@ class AppDb {
           }
           if (oldVersion < 22) {
             await _addColumnIfMissing(db, 'transactions', 'groupId TEXT');
+            await _createGroupTables(db);
+          }
+          if (oldVersion < 23) {
+            await _addColumnIfMissing(
+                db, 'group_transactions', "source TEXT DEFAULT ''");
+            await _createGroupTables(db);
+          }
+          if (oldVersion < 24) {
+            await _createPendingProofsTable(db);
+          }
+          if (oldVersion < 25) {
             await _createGroupTables(db);
           }
         },
@@ -500,6 +516,53 @@ class AppDb {
         whereArgs: [userId],
         orderBy: 'date ASC');
     return rows.map(Transaction.fromMap).toList();
+  }
+
+  // Proof images waiting to be uploaded
+  Future<void> putPendingProof({
+    required String id,
+    required String refType,
+    required String refId,
+    required bool isLocalRef,
+    required Uint8List bytes,
+    required String userId,
+  }) async {
+    await _db.insert(
+      'pending_proofs',
+      {
+        'id': id,
+        'refType': refType,
+        'refId': refId,
+        'isLocalRef': isLocalRef ? 1 : 0,
+        'bytes': bytes,
+        'createdAt': DateTime.now().toIso8601String(),
+        'userId': userId,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<List<PendingProof>> getPendingProofs(String userId) async {
+    final rows = await _db.query('pending_proofs',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'createdAt ASC');
+    return rows.map(PendingProof.fromMap).toList();
+  }
+
+  /// A queued transaction reached the server as [serverId]: its proofs can
+  /// now be uploaded against that id.
+  Future<void> resolvePendingProofs(
+      String localTransactionId, String serverId, String userId) async {
+    await _db.update(
+      'pending_proofs',
+      {'refId': serverId, 'isLocalRef': 0},
+      where: 'userId = ? AND isLocalRef = 1 AND refId = ?',
+      whereArgs: [userId, localTransactionId],
+    );
+  }
+
+  Future<void> deletePendingProof(String id, String userId) async {
+    await _db.delete('pending_proofs',
+        where: 'id = ? AND userId = ?', whereArgs: [id, userId]);
   }
 
   // Delete queue
@@ -696,6 +759,7 @@ class AppDb {
         'spending_group_members',
         'spending_group_status',
         'group_transactions',
+        'group_categories',
       ]) {
         await txn.delete(table,
             where: 'groupId = ? AND userId = ?', whereArgs: [id, userId]);
@@ -719,6 +783,76 @@ class AppDb {
     final rows = await _db.query('group_transactions',
         where: 'userId = ?', whereArgs: [userId], orderBy: 'date DESC');
     return rows.map(GroupTransaction.fromMap).toList();
+  }
+
+  Future<List<GroupCategory>> getGroupCategories(String userId) async {
+    final rows = await _db.query('group_categories',
+        where: 'userId = ?', whereArgs: [userId], orderBy: 'name COLLATE NOCASE');
+    return rows.map(GroupCategory.fromMap).toList();
+  }
+
+  /// Group categories only ever come from the server (they are managed
+  /// online by the group leader), so this is a plain snapshot swap.
+  Future<void> replaceGroupCategories(
+      List<GroupCategory> items, String userId) async {
+    await _db.transaction((txn) async {
+      await txn.delete('group_categories',
+          where: 'userId = ?', whereArgs: [userId]);
+      for (final item in items) {
+        await txn.insert(
+            'group_categories', {...item.toMap(), 'userId': userId},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
+  /// The saved server copy of [key] (see `group_snapshots`), or null.
+  Future<({String json, String savedAt})?> getGroupSnapshot(
+      String key, String userId) async {
+    final rows = await _db.query('group_snapshots',
+        where: 'key = ? AND userId = ?', whereArgs: [key, userId], limit: 1);
+    if (rows.isEmpty) return null;
+    return (
+      json: rows.first['json'] as String,
+      savedAt: rows.first['savedAt'] as String,
+    );
+  }
+
+  Future<void> putGroupSnapshot(
+      String key, String json, String savedAt, String userId) async {
+    await _db.insert(
+        'group_snapshots',
+        {'key': key, 'json': json, 'savedAt': savedAt, 'userId': userId},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  /// Lower-cased username -> display name.
+  Future<Map<String, String>> getDisplayNames() async {
+    final rows = await _db.query('display_names');
+    return {
+      for (final row in rows)
+        (row['username'] as String): row['fullName'] as String,
+    };
+  }
+
+  /// Stores the display names looked up for [usernames]: names found are
+  /// saved, and a username looked up without a name has its old one
+  /// removed (the account cleared it).
+  Future<void> putDisplayNames(
+      Iterable<String> usernames, Map<String, String> names) async {
+    await _db.transaction((txn) async {
+      for (final username in usernames) {
+        final key = username.toLowerCase();
+        final name = names[key];
+        if (name == null || name.trim().isEmpty) {
+          await txn.delete('display_names',
+              where: 'username = ?', whereArgs: [key]);
+        } else {
+          await txn.insert('display_names', {'username': key, 'fullName': name},
+              conflictAlgorithm: ConflictAlgorithm.replace);
+        }
+      }
+    });
   }
 
   Future<void> replaceSpendingGroups(
@@ -1598,9 +1732,36 @@ Future<void> _createGroupTables(Database db) async {
     category TEXT DEFAULT '',
     date TEXT NOT NULL,
     createdBy TEXT DEFAULT '',
+    source TEXT DEFAULT '',
     syncState TEXT DEFAULT 'synced',
     userId TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (transactionType, transactionId, userId)
+  )''');
+  // Categories owned by a group (managed by its leader), cached per account.
+  await db.execute('''CREATE TABLE IF NOT EXISTS group_categories (
+    id TEXT NOT NULL,
+    groupId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'spending',
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, userId)
+  )''');
+  // Display names (full name / alias) of other accounts. Public profile
+  // data, so one copy is shared by every account signed in on the device.
+  await db.execute('''CREATE TABLE IF NOT EXISTS display_names (
+    username TEXT PRIMARY KEY,
+    fullName TEXT NOT NULL
+  )''');
+  // Last server copy of the online-only group datasets (group routines and
+  // their payments, group planned expenses, fund requests), stored as the
+  // raw API JSON per account so the screens still open offline. Writes are
+  // never made against it - they stay online-only.
+  await db.execute('''CREATE TABLE IF NOT EXISTS group_snapshots (
+    key TEXT NOT NULL,
+    json TEXT NOT NULL,
+    savedAt TEXT NOT NULL,
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (key, userId)
   )''');
 }
 
@@ -1638,6 +1799,21 @@ Future<void> _createPendingDeletesTable(Database db) async {
     updatedAt TEXT NOT NULL,
     userId TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (id, resource, userId)
+  )''');
+}
+
+/// Proof images picked while offline, or for a transaction that is itself
+/// still queued ([isLocalRef]: `refId` is then the local transaction id).
+Future<void> _createPendingProofsTable(Database db) async {
+  await db.execute('''CREATE TABLE IF NOT EXISTS pending_proofs (
+    id TEXT NOT NULL,
+    refType TEXT NOT NULL,
+    refId TEXT NOT NULL,
+    isLocalRef INTEGER NOT NULL DEFAULT 0,
+    bytes BLOB NOT NULL,
+    createdAt TEXT NOT NULL,
+    userId TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id, userId)
   )''');
 }
 

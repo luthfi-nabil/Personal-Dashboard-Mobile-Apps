@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/models.dart';
+import '../core/money_input.dart';
 import '../core/repo.dart';
 import '../core/utils.dart';
 import '../providers/providers.dart';
@@ -353,9 +353,7 @@ class _PlannedExpenseScreenState extends ConsumerState<PlannedExpenseScreen> {
     bool partialPayment = false,
   }) async {
     final defaultPrice = partialPayment ? item.price / 2 : item.price;
-    final defaultPriceText = defaultPrice == defaultPrice.roundToDouble()
-        ? defaultPrice.toStringAsFixed(0)
-        : defaultPrice.toStringAsFixed(2);
+    final defaultPriceText = formatMoneyInput(defaultPrice);
     final priceCtl = TextEditingController(
       text: partialPayment ? defaultPriceText : '',
     );
@@ -385,9 +383,7 @@ class _PlannedExpenseScreenState extends ConsumerState<PlannedExpenseScreen> {
                   controller: priceCtl,
                   keyboardType:
                       const TextInputType.numberWithOptions(decimal: true),
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
-                  ],
+                  inputFormatters: moneyInputFormatters,
                   decoration: InputDecoration(
                     labelText:
                         partialPayment ? 'Payment amount' : 'Final price',
@@ -450,7 +446,7 @@ class _PlannedExpenseScreenState extends ConsumerState<PlannedExpenseScreen> {
     );
     if (result != true) return;
     final price =
-        double.tryParse(priceCtl.text.replaceAll(',', '.')) ?? item.price;
+        parseMoney(priceCtl.text) ?? item.price;
     final source = data.sources.firstWhere((s) => s.name == sourceName);
     final category =
         financeCategories.firstWhere((cat) => cat.id == categoryId);
@@ -909,7 +905,7 @@ class _PlannedExpenseEditorSheetState extends ConsumerState<_PlannedExpenseEdito
 
   Future<void> _save() async {
     final name = _nameCtl.text.trim();
-    final price = double.tryParse(_priceCtl.text.replaceAll(',', '.')) ?? 0;
+    final price = parseMoney(_priceCtl.text) ?? 0;
     final data = ref.read(appDataProvider).valueOrNull;
     final categories = data?.categories
             .where((cat) => cat.kind == 'planned_expense')
@@ -973,9 +969,7 @@ class _PlannedExpenseEditorSheetState extends ConsumerState<_PlannedExpenseEdito
               controller: _priceCtl,
               keyboardType:
                   const TextInputType.numberWithOptions(decimal: true),
-              inputFormatters: [
-                FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
-              ],
+              inputFormatters: moneyInputFormatters,
               style: TextStyle(color: c.ink, fontSize: 15),
               decoration: _fieldDecoration(c, 'Price'),
             ),

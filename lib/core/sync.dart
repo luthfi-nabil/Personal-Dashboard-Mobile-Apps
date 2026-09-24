@@ -3,6 +3,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'app_update.dart';
 import 'config.dart';
 import 'db.dart';
+import 'proof_service.dart';
 import 'remote_api.dart';
 import 'repo.dart';
 
@@ -140,6 +141,8 @@ class SyncService {
       // offline needs that group to exist server-side first.
       await Repo.instance.syncPendingGroupWrites();
       await Repo.instance.syncPendingTransactions();
+      // After transactions: a proof of one saved offline needs its id.
+      await ProofService.instance.syncPending();
       await Repo.instance.syncPendingDetailChecks();
       await Repo.instance.syncPendingDeletes();
       await Repo.instance.syncPendingPlanningWrites();

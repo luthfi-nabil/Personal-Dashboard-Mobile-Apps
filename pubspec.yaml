@@ -1,7 +1,7 @@
 name: personal_dashboard
 description: Personal finance dashboard – Flutter port of PWA.
 publish_to: 'none'
-version: 1.1.0+2
+version: 1.4.0+6
 environment:
   sdk: '>=3.3.0 <4.0.0'
 
@@ -32,6 +32,10 @@ dependencies:
   timezone: ^0.10.1
   flutter_timezone: ^5.1.0
   workmanager: ^0.10.9
+  # Proof-of-transfer photos are resized and re-encoded as JPEG on the
+  # device before upload (lib/core/proof_service.dart). Pure Dart, so it
+  # runs on every platform and in tests.
+  image: ^4.3.0
 
 dev_dependencies:
   flutter_test:

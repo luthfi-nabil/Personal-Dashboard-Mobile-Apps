@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
+import 'account_switcher.dart';
 
 class AppMenuDrawer extends ConsumerWidget {
   final String currentPath;
@@ -13,7 +14,8 @@ class AppMenuDrawer extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = AppTheme.colorsOf(context);
-    final username = ref.watch(configProvider.select((cfg) => cfg.username));
+    final username =
+        ref.watch(configProvider.select((cfg) => cfg.displayName));
     final healthEnabled =
         ref.watch(configProvider.select((cfg) => cfg.healthEnabled));
     final pendingCount = ref.watch(pendingSyncCountProvider);
@@ -37,7 +39,13 @@ class AppMenuDrawer extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Padding(
+            InkWell(
+              // Switch between the accounts signed in on this device.
+              onTap: () {
+                Navigator.pop(context);
+                showAccountSwitcher(context);
+              },
+              child: Padding(
               padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
               child: Row(
                 children: [
@@ -72,8 +80,10 @@ class AppMenuDrawer extends ConsumerWidget {
                       ),
                     ),
                   ),
+                  Icon(Icons.unfold_more_rounded, color: c.muted, size: 20),
                 ],
               ),
+            ),
             ),
             Divider(color: c.line2, height: 1),
             Expanded(

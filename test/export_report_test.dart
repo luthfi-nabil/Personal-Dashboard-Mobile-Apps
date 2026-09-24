@@ -131,7 +131,9 @@ void main() {
 
     test('availableMonths lists every month with data, newest first', () {
       final months = ExportReport.availableMonths(sampleData());
-      expect(months.take(3), ['2026-07', '2026-06', '2026-05']);
+      // The current month is always offered too, so only check the order of
+      // the months that come from the data.
+      expect(months, containsAllInOrder(['2026-07', '2026-06', '2026-05']));
     });
   });
 

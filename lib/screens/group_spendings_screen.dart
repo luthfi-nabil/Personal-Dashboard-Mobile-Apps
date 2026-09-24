@@ -2,12 +2,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../core/group_models.dart';
 import '../core/models.dart';
 import '../core/remote_api.dart';
 import '../core/repo.dart';
+import '../core/routine_schedule.dart';
 import '../core/utils.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
+import '../widgets/routine_widgets.dart';
+import 'group_categories_sheet.dart';
+import 'group_funds_screen.dart';
+import 'group_plans_screen.dart';
+import 'group_target_screen.dart';
+import 'group_transaction_screen.dart';
 
 /// Shared ledgers several users tag their own spendings/earnings into.
 ///
@@ -76,6 +84,7 @@ class GroupSpendingsScreen extends ConsumerWidget {
                 final totals = _Totals()..addAll(rows);
                 return _GroupCard(
                   group: group,
+                  leaderName: data.displayName(group.leader),
                   active: data.isGroupActive(group.id),
                   isLeader: group.leader == me,
                   memberCount: data.membersOf(group.id).length,
@@ -165,16 +174,34 @@ class _GroupSpendingDetailScreenState
             final afterOff =
                 rows.where((t) => data.isAfterTurnedOff(t)).toList();
             final members = data.membersOf(group.id);
+            // Online-only; offline the recap simply shows no settlements.
+            final settlements =
+                ref.watch(groupSettlementsProvider(group.id)).valueOrNull;
+            // Online-only as well. Members only see the link while the
+            // leader has target spendings on; the leader always sees it, to
+            // switch them.
+            final targets =
+                ref.watch(groupTargetsProvider(group.id)).valueOrNull;
+            final thisMonth = isoMonth(DateTime.now().toIso8601String());
+            // Group routines for the "Due" list; falls back to the copy
+            // saved on the device when offline.
+            final plans = ref.watch(groupPlansProvider).valueOrNull;
+            final funds = ref.watch(fundRequestsProvider).valueOrNull;
 
             return RefreshIndicator(
-              onRefresh: () =>
-                  ref.read(appDataProvider.notifier).refreshFromServer(),
+              onRefresh: () {
+                ref.invalidate(groupSettlementsProvider(group.id));
+                ref.invalidate(groupTargetsProvider(group.id));
+                ref.invalidate(groupPlansProvider);
+                ref.invalidate(fundRequestsProvider);
+                return ref.read(appDataProvider.notifier).refreshFromServer();
+              },
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
                 children: [
                   _Header(title: group.name, c: c),
                   _StatusPanel(
-                    group: group,
+                    leaderName: data.displayName(group.leader),
                     active: active,
                     isLeader: isLeader,
                     c: c,
@@ -194,15 +221,76 @@ class _GroupSpendingDetailScreenState
                   ),
                   const SizedBox(height: 8),
                   _FeatureLink(
-                    icon: Icons.account_balance_wallet_outlined,
-                    title: 'Group balance',
-                    subtitle: isLeader
-                        ? 'Add to your balance, spend it, see everyone\'s'
-                        : 'Add to your balance and spend it on the group',
+                    icon: Icons.request_page_outlined,
+                    title: 'Request funds',
+                    subtitle: _fundsSubtitle(
+                        funds?.of(group.id) ?? const [], me, isLeader),
                     c: c,
                     onTap: () =>
-                        context.push('/group-spendings/${group.id}/balance'),
+                        context.push('/group-spendings/${group.id}/funds'),
                   ),
+                  if (targets != null &&
+                      (targets.enabled || targets.isLeader)) ...[
+                    const SizedBox(height: 8),
+                    _FeatureLink(
+                      icon: Icons.flag_outlined,
+                      title: 'Target spendings',
+                      subtitle: _targetSubtitle(
+                        targets,
+                        spent: groupMonthSpending(
+                            data, group.id, me, thisMonth)[me.toLowerCase()],
+                        me: me,
+                        currency: cfg.currency,
+                      ),
+                      c: c,
+                      onTap: () =>
+                          context.push('/group-spendings/${group.id}/targets'),
+                      trailing: targets.isLeader
+                          ? Switch(
+                              value: targets.enabled,
+                              onChanged: (v) => setGroupTargetsEnabled(
+                                  context, ref, group.id, v),
+                            )
+                          : null,
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  _FeatureLink(
+                    icon: Icons.label_outline_rounded,
+                    title: 'Categories',
+                    subtitle: [
+                      '${data.groupCategoriesOf(group.id).length} '
+                          'group categories',
+                      isLeader ? 'add or remove' : 'managed by the admin',
+                    ].join(' · '),
+                    c: c,
+                    onTap: () => showGroupCategoriesSheet(context, group,
+                        isLeader: isLeader),
+                  ),
+                  if (plans != null &&
+                      plans.routinesOf(group.id).isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    _DuePanel(
+                      routines: plans.routinesOf(group.id),
+                      nameOf: data.displayName,
+                      me: me,
+                      currency: cfg.currency,
+                      c: c,
+                      onOpen: () =>
+                          context.push('/group-spendings/${group.id}/plans'),
+                    ),
+                  ],
+                  if (settlements != null)
+                    _AttentionPanel(
+                      settlements: settlements,
+                      transactions: all,
+                      nameOf: data.displayName,
+                      me: me,
+                      currency: cfg.currency,
+                      c: c,
+                      onOpen: (txnId) => context
+                          .push('/group-spendings/${group.id}/txn/$txnId'),
+                    ),
                   const SizedBox(height: 14),
                   _MonthBar(
                     month: _month,
@@ -229,6 +317,7 @@ class _GroupSpendingDetailScreenState
                     members: members,
                     rows: regular,
                     leader: group.leader,
+                    nameOf: data.displayName,
                     currency: cfg.currency,
                     c: c,
                   ),
@@ -259,10 +348,15 @@ class _GroupSpendingDetailScreenState
                   else
                     ...rows.map((t) => _GroupTxnTile(
                           txn: t,
+                          spender: data.displayName(t.createdBy),
                           afterOff: data.isAfterTurnedOff(t),
-                          isMine: t.createdBy == me,
+                          settlement: t.transactionType == 'earning'
+                              ? null
+                              : settlements?.forTransaction(t.transactionId),
                           currency: cfg.currency,
                           c: c,
+                          onTap: () => context.push(
+                              '/group-spendings/${group.id}/txn/${t.transactionId}'),
                         )),
                   const SizedBox(height: 20),
                   Row(
@@ -271,8 +365,7 @@ class _GroupSpendingDetailScreenState
                           child:
                               _SectionTitle('Members (${members.length})', c)),
                       TextButton.icon(
-                        onPressed: () =>
-                            _addMember(context, group, members),
+                        onPressed: () => _addMember(context, group, members),
                         icon: const Icon(Icons.person_add_alt_1_outlined,
                             size: 18),
                         label: const Text('Add'),
@@ -282,6 +375,8 @@ class _GroupSpendingDetailScreenState
                   const SizedBox(height: 6),
                   ...members.map((m) => _MemberTile(
                         member: m,
+                        name: data.displayName(m.username),
+                        addedByName: data.displayName(m.addedBy),
                         isLeader: m.username == group.leader,
                         isMe: m.username == me,
                         c: c,
@@ -305,7 +400,8 @@ class _GroupSpendingDetailScreenState
       action: 'Add',
     );
     if (username == null) return;
-    if (members.any((m) => m.username.toLowerCase() == username.toLowerCase())) {
+    if (members
+        .any((m) => m.username.toLowerCase() == username.toLowerCase())) {
       if (context.mounted) _snack(context, '$username is already a member.');
       return;
     }
@@ -326,6 +422,40 @@ class _GroupSpendingDetailScreenState
     }
     await ref.read(appDataProvider.notifier).refresh();
   }
+}
+
+/// One line for the fund requests link: what waits for the user, if
+/// anything.
+String _fundsSubtitle(List<GroupFundRequest> funds, String me, bool isLeader) {
+  bool same(String a) => a.toLowerCase() == me.toLowerCase();
+  final forMe = funds.where((r) => r.isWaiting && same(r.payer)).length;
+  final mine = funds.where((r) => r.isWaiting && same(r.requester)).length;
+  final parts = [
+    if (forMe > 0) '$forMe waiting for you',
+    if (mine > 0) '$mine of yours waiting',
+  ];
+  if (parts.isNotEmpty) return parts.join(' · ');
+  return isLeader
+      ? 'Ask or send money for a purpose; waive tracked funds'
+      : 'Ask a member for money for a purpose, or send some';
+}
+
+/// One line for the target spendings link: off, no target yet, or how this
+/// month is going.
+String _targetSubtitle(GroupTargets targets,
+    {required double? spent, required String me, required String currency}) {
+  if (!targets.enabled) return 'Off - hidden for members. Switch on to use';
+  final target = targets.targetOf(me);
+  if (target == null) {
+    return targets.isLeader
+        ? 'Set your monthly target; see everyone\'s'
+        : 'Set how much you mean to spend each month';
+  }
+  final p = TargetProgress(target: target, spent: spent ?? 0);
+  return p.isOver
+      ? 'Over your target by ${fmtRp(-p.left, currency)} this month'
+      : '${fmtRp(p.left, currency)} left of ${fmtRp(target, currency)} '
+          'this month';
 }
 
 /// Leader-only on/off switch, shared by the list and the detail screen.
@@ -446,6 +576,7 @@ class _Header extends StatelessWidget {
 
 class _GroupCard extends StatelessWidget {
   final SpendingGroup group;
+  final String leaderName;
   final bool active;
   final bool isLeader;
   final int memberCount;
@@ -457,6 +588,7 @@ class _GroupCard extends StatelessWidget {
 
   const _GroupCard({
     required this.group,
+    required this.leaderName,
     required this.active,
     required this.isLeader,
     required this.memberCount,
@@ -515,7 +647,7 @@ class _GroupCard extends StatelessWidget {
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        '${isLeader ? 'You lead' : 'Led by ${group.leader}'}'
+                        '${isLeader ? 'You lead' : 'Led by $leaderName'}'
                         ' · $memberCount member${memberCount == 1 ? '' : 's'}',
                         style: TextStyle(fontSize: 12, color: c.muted),
                       ),
@@ -564,12 +696,16 @@ class _FeatureLink extends StatelessWidget {
   final AppColors c;
   final VoidCallback onTap;
 
+  /// Shown instead of the chevron, e.g. the leader's switch.
+  final Widget? trailing;
+
   const _FeatureLink({
     required this.icon,
     required this.title,
     required this.subtitle,
     required this.c,
     required this.onTap,
+    this.trailing,
   });
 
   @override
@@ -605,7 +741,7 @@ class _FeatureLink extends StatelessWidget {
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right_rounded, color: c.muted),
+              trailing ?? Icon(Icons.chevron_right_rounded, color: c.muted),
             ],
           ),
         ),
@@ -615,14 +751,14 @@ class _FeatureLink extends StatelessWidget {
 }
 
 class _StatusPanel extends StatelessWidget {
-  final SpendingGroup group;
+  final String leaderName;
   final bool active;
   final bool isLeader;
   final AppColors c;
   final ValueChanged<bool> onToggle;
 
   const _StatusPanel({
-    required this.group,
+    required this.leaderName,
     required this.active,
     required this.isLeader,
     required this.c,
@@ -653,7 +789,7 @@ class _StatusPanel extends StatelessWidget {
                 Text(
                   isLeader
                       ? 'You are the leader.'
-                      : 'Only ${group.leader} (leader) can switch it.',
+                      : 'Only $leaderName (leader) can switch it.',
                   style: TextStyle(fontSize: 12, color: c.muted),
                 ),
               ],
@@ -698,8 +834,9 @@ class _MonthBar extends StatelessWidget {
           onPressed: month == null ? null : () => onChanged(nextMonth(current)),
         ),
         TextButton(
-          onPressed: () => onChanged(
-              month == null ? isoMonth(DateTime.now().toIso8601String()) : null),
+          onPressed: () => onChanged(month == null
+              ? isoMonth(DateTime.now().toIso8601String())
+              : null),
           child: Text(month == null ? 'This month' : 'All time'),
         ),
       ],
@@ -801,6 +938,9 @@ class _MemberBreakdown extends StatelessWidget {
   final List<GroupMember> members;
   final List<GroupTransaction> rows;
   final String leader;
+
+  /// Username -> display name.
+  final String Function(String) nameOf;
   final String currency;
   final AppColors c;
 
@@ -808,6 +948,7 @@ class _MemberBreakdown extends StatelessWidget {
     required this.members,
     required this.rows,
     required this.leader,
+    required this.nameOf,
     required this.currency,
     required this.c,
   });
@@ -838,7 +979,9 @@ class _MemberBreakdown extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(
-                        entry.key == leader ? '${entry.key} ★' : entry.key,
+                        entry.key == leader
+                            ? '${nameOf(entry.key)} ★'
+                            : nameOf(entry.key),
                         style: TextStyle(
                             fontSize: 14,
                             fontWeight: FontWeight.w500,
@@ -966,8 +1109,8 @@ class _MonthlyBreakdown extends StatelessWidget {
       return _EmptyPanel(c: c, text: 'No months to show yet.');
     }
     final months = regular.keys.toList()..sort((a, b) => b.compareTo(a));
-    final header = TextStyle(
-        fontSize: 11, fontWeight: FontWeight.w600, color: c.muted);
+    final header =
+        TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: c.muted);
     return _Panel(
       c: c,
       children: [
@@ -1040,17 +1183,25 @@ class _MonthlyBreakdown extends StatelessWidget {
 
 class _GroupTxnTile extends StatelessWidget {
   final GroupTransaction txn;
+
+  /// Display name of the member who spent (or received) it.
+  final String spender;
   final bool afterOff;
-  final bool isMine;
+
+  /// Reimbursements / split bill of a spending, when loaded.
+  final TransactionSettlement? settlement;
   final String currency;
   final AppColors c;
+  final VoidCallback onTap;
 
   const _GroupTxnTile({
     required this.txn,
+    required this.spender,
     required this.afterOff,
-    required this.isMine,
+    required this.settlement,
     required this.currency,
     required this.c,
+    required this.onTap,
   });
 
   @override
@@ -1059,63 +1210,300 @@ class _GroupTxnTile extends StatelessWidget {
     final title = txn.description.trim().isNotEmpty
         ? txn.description.trim()
         : (txn.category.isEmpty ? txn.transactionType : txn.category);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
+    final s = settlement;
+    final pending = s == null ? 0 : s.payments.where((p) => p.isPending).length;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
         color: c.surface,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-            color: afterOff ? c.transfer.withValues(alpha: 0.5) : c.line2,
-            width: afterOff ? 1 : 0.5),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                  color: afterOff ? c.transfer.withValues(alpha: 0.5) : c.line2,
+                  width: afterOff ? 1 : 0.5),
+            ),
+            child: Row(
               children: [
-                Text(title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: c.ink)),
-                const SizedBox(height: 3),
-                Text(
-                  [
-                    isMine ? 'You' : txn.createdBy,
-                    if (txn.category.isNotEmpty && title != txn.category)
-                      txn.category,
-                    fmtDate(txn.date, 'long'),
-                  ].join(' · '),
-                  style: TextStyle(fontSize: 12, color: c.muted),
-                ),
-                if (afterOff || txn.syncState == 'pending') ...[
-                  const SizedBox(height: 5),
-                  Wrap(
-                    spacing: 4,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (afterOff)
-                        _Chip(label: 'After turned off', color: c.transfer),
-                      if (txn.syncState == 'pending')
-                        _Chip(label: 'Pending sync', color: c.muted),
+                      Text(title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                              color: c.ink)),
+                      const SizedBox(height: 3),
+                      Text(
+                        [
+                          // The spender's own source: "user - source".
+                          txn.source.isEmpty
+                              ? spender
+                              : '$spender - ${txn.source}',
+                          if (txn.category.isNotEmpty && title != txn.category)
+                            txn.category,
+                          fmtDate(txn.date, 'long'),
+                        ].join(' · '),
+                        style: TextStyle(fontSize: 12, color: c.muted),
+                      ),
+                      if (s != null && s.reimbursed > 0) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          [
+                            'Reimbursed ${fmtRp(s.reimbursed, currency)}',
+                            if (s.balanceReturned > 0)
+                              'balance returned '
+                                  '${fmtRp(s.balanceReturned, currency)}',
+                          ].join(' · '),
+                          style: TextStyle(fontSize: 12, color: c.pos),
+                        ),
+                      ],
+                      if (s != null && s.shares.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          'Split bill · paid ${fmtRp(s.splitPaid, currency)} of '
+                          '${fmtRp(s.splitTotal, currency)} '
+                          '(${s.shares.length} ${s.shares.length == 1 ? 'person' : 'people'})',
+                          style: TextStyle(fontSize: 12, color: c.ink2),
+                        ),
+                      ],
+                      if (afterOff ||
+                          txn.syncState == 'pending' ||
+                          pending > 0) ...[
+                        const SizedBox(height: 5),
+                        Wrap(
+                          spacing: 4,
+                          children: [
+                            if (afterOff)
+                              _Chip(
+                                  label: 'After turned off', color: c.transfer),
+                            if (txn.syncState == 'pending')
+                              _Chip(label: 'Pending sync', color: c.muted),
+                            if (pending > 0)
+                              _Chip(
+                                  label: '$pending waiting approval',
+                                  color: c.transfer),
+                          ],
+                        ),
+                      ],
                     ],
                   ),
-                ],
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  '${isEarning ? '+' : '−'}${fmtRp(txn.amount, currency)}',
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: isEarning ? c.pos : c.neg),
+                ),
               ],
             ),
           ),
-          const SizedBox(width: 10),
-          Text(
-            '${isEarning ? '+' : '−'}${fmtRp(txn.amount, currency)}',
-            style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: isEarning ? c.pos : c.neg),
+        ),
+      ),
+    );
+  }
+}
+
+/// What the user has to act on in this group's split bills: payments waiting
+/// for their approval, and shares they still owe.
+/// The group's routines by due date: due on the first day of their period
+/// (the 1st of the month for a monthly one), with Paid / Not Paid for the
+/// current period. Tapping opens the routines screen to pay.
+class _DuePanel extends StatelessWidget {
+  final List<GroupRoutine> routines;
+  final String Function(String username) nameOf;
+  final String me;
+  final String currency;
+  final AppColors c;
+  final VoidCallback onOpen;
+
+  const _DuePanel({
+    required this.routines,
+    required this.nameOf,
+    required this.me,
+    required this.currency,
+    required this.c,
+    required this.onOpen,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final rows = [
+      for (final r in routines)
+        (
+          routine: r,
+          paid: groupRoutinePaid(r, today),
+          due: periodDueDate(
+              reminder: r.reminder,
+              lastPaidAt: r.lastPaidAt,
+              createdDate: r.createdDate,
+              today: today),
+        ),
+    ]..sort((a, b) {
+        // Unpaid first, then by due date.
+        if (a.paid != b.paid) return a.paid ? 1 : -1;
+        return a.due.compareTo(b.due);
+      });
+    final unpaid = rows.where((r) => !r.paid).length;
+    return _Panel(
+      c: c,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                  unpaid == 0
+                      ? 'Routines due · all paid'
+                      : 'Routines due · $unpaid not paid',
+                  style: TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w700, color: c.ink)),
+            ),
+            TextButton(onPressed: onOpen, child: const Text('Open')),
+          ],
+        ),
+        for (final row in rows)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(row.routine.itemName,
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: c.ink)),
+                      Text(
+                        [
+                          '${row.paid ? 'Next due' : 'Due'} '
+                              '${_day(row.due)}',
+                          reminderLabel(row.routine.reminder),
+                          if (row.paid && row.routine.lastPaidBy != null)
+                            'paid by ${row.routine.lastPaidBy == me ? 'you' : nameOf(row.routine.lastPaidBy!)}',
+                        ].join(' · '),
+                        style: TextStyle(
+                            fontSize: 12,
+                            color:
+                                !row.paid && row.due.isBefore(dateOnly(today))
+                                    ? c.neg
+                                    : c.muted),
+                      ),
+                    ],
+                  ),
+                ),
+                Text(fmtRp(row.routine.price, currency),
+                    style: TextStyle(fontSize: 13, color: c.ink2)),
+                const SizedBox(width: 8),
+                PaidStatusChip(paid: row.paid, c: c),
+              ],
+            ),
           ),
-        ],
+      ],
+    );
+  }
+
+  static String _day(DateTime d) =>
+      fmtDate(DateTime(d.year, d.month, d.day).toIso8601String(), 'long');
+}
+
+class _AttentionPanel extends StatelessWidget {
+  final GroupSettlements settlements;
+  final List<GroupTransaction> transactions;
+
+  /// Username -> display name.
+  final String Function(String) nameOf;
+  final String me;
+  final String currency;
+  final AppColors c;
+  final ValueChanged<String> onOpen;
+
+  const _AttentionPanel({
+    required this.settlements,
+    required this.transactions,
+    required this.nameOf,
+    required this.me,
+    required this.currency,
+    required this.c,
+    required this.onOpen,
+  });
+
+  String _titleOf(String txnId) {
+    final t = transactions.where((t) => t.transactionId == txnId).firstOrNull;
+    if (t == null) return 'a group spending';
+    final text = t.description.trim();
+    if (text.isNotEmpty) return text;
+    return t.category.isEmpty ? 'a spending' : t.category;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lower = me.toLowerCase();
+    final toApprove = settlements.payments
+        .where((p) => p.isPending && p.owner.toLowerCase() == lower)
+        .toList();
+    final owed =
+        settlements.shares.where((s) => s.isFor(me) && s.payable > 0).toList();
+    if (toApprove.isEmpty && owed.isEmpty) return const SizedBox.shrink();
+
+    Widget row(IconData icon, String text, String txnId) => InkWell(
+          onTap: () => onOpen(txnId),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Row(
+              children: [
+                Icon(icon, size: 18, color: c.transfer),
+                const SizedBox(width: 10),
+                Expanded(
+                    child: Text(text,
+                        style: TextStyle(fontSize: 13, color: c.ink))),
+                Icon(Icons.chevron_right_rounded, size: 18, color: c.muted),
+              ],
+            ),
+          ),
+        );
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
+        decoration: BoxDecoration(
+          color: c.transfer.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: c.transfer.withValues(alpha: 0.35)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Split bills need you',
+                style: TextStyle(
+                    fontSize: 13, fontWeight: FontWeight.w600, color: c.ink)),
+            for (final p in toApprove)
+              row(
+                  Icons.how_to_reg_outlined,
+                  '${nameOf(p.payerName)} paid ${fmtRp(p.amount, currency)} for '
+                  '${_titleOf(p.transactionId)} - approve it',
+                  p.transactionId),
+            for (final s in owed)
+              row(
+                  Icons.payments_outlined,
+                  'You owe ${nameOf(s.owner)} ${fmtRp(s.payable, currency)} for '
+                  '${_titleOf(s.transactionId)}',
+                  s.transactionId),
+          ],
+        ),
       ),
     );
   }
@@ -1123,12 +1511,18 @@ class _GroupTxnTile extends StatelessWidget {
 
 class _MemberTile extends StatelessWidget {
   final GroupMember member;
+
+  /// Display names of the member and of whoever added them.
+  final String name;
+  final String addedByName;
   final bool isLeader;
   final bool isMe;
   final AppColors c;
 
   const _MemberTile({
     required this.member,
+    required this.name,
+    required this.addedByName,
     required this.isLeader,
     required this.isMe,
     required this.c,
@@ -1143,19 +1537,23 @@ class _MemberTile extends StatelessWidget {
         radius: 16,
         backgroundColor: c.surface2,
         child: Text(
-          member.username.isEmpty ? '?' : member.username[0].toUpperCase(),
+          name.isEmpty ? '?' : name[0].toUpperCase(),
           style: TextStyle(color: c.ink, fontWeight: FontWeight.w600),
         ),
       ),
-      title: Text(isMe ? '${member.username} (you)' : member.username,
+      title: Text(isMe ? '$name (you)' : name,
           style: TextStyle(color: c.ink, fontSize: 14)),
       subtitle: member.syncState == 'pending' && !isLeader
           ? Text('Not verified yet - checked when back online',
               style: TextStyle(color: c.muted, fontSize: 12))
-          : member.addedBy.isNotEmpty && member.addedBy != member.username
-              ? Text('Added by ${member.addedBy}',
-                  style: TextStyle(color: c.muted, fontSize: 12))
-              : null,
+          : Text(
+              [
+                '@${member.username}',
+                if (member.addedBy.isNotEmpty &&
+                    member.addedBy != member.username)
+                  'added by $addedByName',
+              ].join(' · '),
+              style: TextStyle(color: c.muted, fontSize: 12)),
       trailing: Wrap(
         spacing: 4,
         children: [
@@ -1255,8 +1653,8 @@ class _SectionTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Text(text,
-        style: TextStyle(
-            fontSize: 16, fontWeight: FontWeight.w700, color: c.ink));
+        style:
+            TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: c.ink));
   }
 }
 

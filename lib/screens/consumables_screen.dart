@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/models.dart';
+import '../core/money_input.dart';
 import '../core/repo.dart';
 import '../core/utils.dart';
 import '../providers/providers.dart';
@@ -417,7 +418,7 @@ class _ConsumableEditorSheetState extends State<_ConsumableEditorSheet> {
       _ConsumableDraft(
         itemName: name,
         count: _count,
-        price: double.tryParse(_priceCtl.text.replaceAll(',', '.')) ?? 0,
+        price: parseMoney(_priceCtl.text) ?? 0,
         notes: _notesCtl.text.trim(),
         inDate: _inDate.toIso8601String(),
       ),
@@ -481,9 +482,7 @@ class _ConsumableEditorSheetState extends State<_ConsumableEditorSheet> {
                     controller: _priceCtl,
                     keyboardType:
                         const TextInputType.numberWithOptions(decimal: true),
-                    inputFormatters: [
-                      FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
-                    ],
+                    inputFormatters: moneyInputFormatters,
                     style: TextStyle(fontSize: 15, color: c.ink),
                     decoration: _fieldDecoration(c, 'Price per unit'),
                   ),

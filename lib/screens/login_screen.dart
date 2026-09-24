@@ -9,8 +9,13 @@ import '../providers/providers.dart';
 /// Login / register screen for login-api. On success the issued JWT is
 /// stored in [AppConfig] and sent as a Bearer token to transaction-api /
 /// health-api's `/api/user/...` routes.
+///
+/// With [addAccount] it signs in one more account next to the ones already
+/// on the device (see [ConfigService.accounts]); the new one becomes active.
 class LoginScreen extends ConsumerStatefulWidget {
-  const LoginScreen({super.key});
+  final bool addAccount;
+
+  const LoginScreen({super.key, this.addAccount = false});
 
   @override
   ConsumerState<LoginScreen> createState() => _LoginScreenState();
@@ -19,6 +24,7 @@ class LoginScreen extends ConsumerStatefulWidget {
 class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _usernameCtl = TextEditingController();
   final _passwordCtl = TextEditingController();
+  final _fullNameCtl = TextEditingController();
   final _emailCtl = TextEditingController();
   final _phoneCtl = TextEditingController();
   final _telegramCtl = TextEditingController();
@@ -32,6 +38,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   void dispose() {
     _usernameCtl.dispose();
     _passwordCtl.dispose();
+    _fullNameCtl.dispose();
     _emailCtl.dispose();
     _phoneCtl.dispose();
     _telegramCtl.dispose();
@@ -65,25 +72,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           telegramUsername: _telegramCtl.text.trim().isEmpty
               ? null
               : _telegramCtl.text.trim(),
+          fullName: _fullNameCtl.text.trim().isEmpty
+              ? null
+              : _fullNameCtl.text.trim(),
         );
       }
 
       final auth = await api.login(username: username, password: password);
-      await ConfigService.instance.savePassword(password);
-      final expiresIn = (auth['expires_in'] as num?)?.toInt();
-      final expiresAt = expiresIn == null || expiresIn <= 0
-          ? ''
-          : DateTime.now().add(Duration(seconds: expiresIn)).toIso8601String();
-
-      await ref.read(configProvider.notifier).update(cfg.copyWith(
-            authToken: auth['token'] as String? ?? '',
-            tokenExpiresAt: expiresAt,
-            username: auth['username'] as String? ?? username,
-            userId: auth['user_id'] as String? ?? '',
-            email: auth['email'] as String? ?? '',
-            phoneNumber: auth['phone_number'] as String? ?? '',
-            telegramUsername: auth['telegram_username'] as String? ?? '',
-          ));
+      // ConfigService notifies configProvider, which rebuilds every screen
+      // for the new account's own local data.
+      await ConfigService.instance
+          .signIn(auth, username: username, password: password);
 
       if (mounted) context.go('/');
     } on ApiException catch (e) {
@@ -91,6 +90,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  Future<void> _switchTo(SavedAccount account) async {
+    await ConfigService.instance.switchAccount(account.userId);
+    if (mounted) context.go('/');
   }
 
   void _toggleMode() {
@@ -104,8 +108,23 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     final c = AppTheme.colorsOf(context);
+    final signedIn = widget.addAccount
+        ? ConfigService.instance.accounts
+        : const <SavedAccount>[];
     return Scaffold(
       backgroundColor: c.bg,
+      appBar: widget.addAccount
+          ? AppBar(
+              backgroundColor: c.bg,
+              elevation: 0,
+              leading: IconButton(
+                icon: Icon(Icons.close, color: c.ink),
+                tooltip: 'Cancel',
+                onPressed: () =>
+                    context.canPop() ? context.pop() : context.go('/'),
+              ),
+            )
+          : null,
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -130,7 +149,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ),
                   const SizedBox(height: 20),
                   Text(
-                    _registerMode ? 'Create an account' : 'Welcome back',
+                    _registerMode
+                        ? 'Create an account'
+                        : (widget.addAccount
+                            ? 'Add another account'
+                            : 'Welcome back'),
                     style: TextStyle(
                         fontSize: 26,
                         fontWeight: FontWeight.w700,
@@ -142,10 +165,45 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   Text(
                     _registerMode
                         ? 'Register with login-api to sync your data.'
-                        : 'Sign in with login-api to sync your data.',
+                        : (widget.addAccount
+                            ? 'Each account keeps its own data on this device.'
+                            : 'Sign in with login-api to sync your data.'),
                     textAlign: TextAlign.center,
                     style: TextStyle(color: c.muted, fontSize: 13),
                   ),
+                  if (signedIn.isNotEmpty) ...[
+                    const SizedBox(height: 20),
+                    Text('SIGNED IN ON THIS DEVICE',
+                        style: TextStyle(
+                            color: c.muted,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.6)),
+                    const SizedBox(height: 6),
+                    for (final account in signedIn)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: CircleAvatar(
+                          backgroundColor: c.ink,
+                          foregroundColor: c.bg,
+                          child: Text(account.displayName.isEmpty
+                              ? '?'
+                              : account.displayName[0].toUpperCase()),
+                        ),
+                        title: Text(account.displayName,
+                            style: TextStyle(color: c.ink)),
+                        subtitle: account.fullName.trim().isEmpty
+                            ? null
+                            : Text('@${account.username}',
+                                style: TextStyle(color: c.muted)),
+                        trailing: account.userId ==
+                                ConfigService.instance.current.userId
+                            ? Text('Active',
+                                style: TextStyle(color: c.muted, fontSize: 12))
+                            : Icon(Icons.chevron_right, color: c.muted),
+                        onTap: _loading ? null : () => _switchTo(account),
+                      ),
+                  ],
                   const SizedBox(height: 24),
                   TextField(
                     controller: _usernameCtl,
@@ -166,6 +224,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     onSubmitted: (_) => _registerMode ? null : _submit(),
                   ),
                   if (_registerMode) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _fullNameCtl,
+                      style: TextStyle(color: c.ink),
+                      decoration: const InputDecoration(
+                          labelText: 'Full name or alias (optional)',
+                          helperText: 'Shown to your group members'),
+                      textCapitalization: TextCapitalization.words,
+                      textInputAction: TextInputAction.next,
+                    ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: _emailCtl,

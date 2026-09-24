@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'features.dart';
 
@@ -891,6 +892,10 @@ class GroupTransaction {
   final String category;
   final String date;
   final String createdBy;
+
+  /// The spender's source it was paid from (or received into), or "Group
+  /// balance". Empty for rows cached before the server sent it.
+  final String source;
   final String syncState;
 
   const GroupTransaction({
@@ -902,6 +907,7 @@ class GroupTransaction {
     this.category = '',
     required this.date,
     required this.createdBy,
+    this.source = '',
     this.syncState = 'synced',
   });
 
@@ -914,6 +920,7 @@ class GroupTransaction {
         category: m['category'] as String? ?? '',
         date: m['date'] as String,
         createdBy: m['createdBy'] as String? ?? '',
+        source: m['source'] as String? ?? '',
         syncState: m['syncState'] as String? ?? 'synced',
       );
 
@@ -926,6 +933,7 @@ class GroupTransaction {
         category: m['category'] as String? ?? '',
         date: (m['created_date'] ?? '').toString(),
         createdBy: m['created_by'] as String? ?? '',
+        source: m['source'] as String? ?? '',
         syncState: 'synced',
       );
 
@@ -938,7 +946,48 @@ class GroupTransaction {
         'category': category,
         'date': date,
         'createdBy': createdBy,
+        'source': source,
         'syncState': syncState,
+      };
+}
+
+/// A category owned by a spending group instead of a user. Transactions added
+/// to a group are filed under these, so every member sees the same labels.
+/// Only the group leader (admin) can add or remove them.
+class GroupCategory {
+  final String id;
+  final String groupId;
+  final String name;
+
+  /// `spending` or `earning`.
+  final String kind;
+
+  const GroupCategory({
+    required this.id,
+    required this.groupId,
+    required this.name,
+    this.kind = 'spending',
+  });
+
+  factory GroupCategory.fromMap(Map<String, dynamic> m) => GroupCategory(
+        id: m['id'] as String,
+        groupId: m['groupId'] as String,
+        name: m['name'] as String? ?? '',
+        kind: m['kind'] as String? ?? 'spending',
+      );
+
+  factory GroupCategory.fromApi(Map<String, dynamic> m) => GroupCategory(
+        id: m['category_id'] as String,
+        groupId: m['group_id'] as String,
+        name: m['category_name'] as String? ?? '',
+        kind: m['kind'] as String? ?? 'spending',
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'groupId': groupId,
+        'name': name,
+        'kind': kind,
       };
 }
 
@@ -1154,6 +1203,10 @@ class AppConfig {
   final String density;
   final String currency;
   final String username;
+
+  /// Display name (full name or alias) shown to group members instead of
+  /// [username]. Empty when the account has none.
+  final String fullName;
   final String email;
   final String phoneNumber;
   final String telegramUsername;
@@ -1199,6 +1252,7 @@ class AppConfig {
     this.density = 'regular',
     this.currency = 'full',
     this.username = '',
+    this.fullName = '',
     this.email = '',
     this.phoneNumber = '',
     this.telegramUsername = '',
@@ -1243,6 +1297,10 @@ class AppConfig {
   /// checked whether the app was "configured".
   bool get isConfigured => isLoggedIn;
 
+  /// [fullName] when set, otherwise [username].
+  String get displayName =>
+      fullName.trim().isNotEmpty ? fullName.trim() : username;
+
   factory AppConfig.fromJson(String raw) {
     final m = jsonDecode(raw) as Map<String, dynamic>;
     return AppConfig(
@@ -1255,6 +1313,7 @@ class AppConfig {
       density: m['density'] as String? ?? 'regular',
       currency: m['currency'] as String? ?? 'full',
       username: m['username'] as String? ?? '',
+      fullName: m['fullName'] as String? ?? '',
       email: m['email'] as String? ?? '',
       phoneNumber: m['phoneNumber'] as String? ?? '',
       telegramUsername: m['telegramUsername'] as String? ?? '',
@@ -1281,6 +1340,7 @@ class AppConfig {
         'density': density,
         'currency': currency,
         'username': username,
+        'fullName': fullName,
         'email': email,
         'phoneNumber': phoneNumber,
         'telegramUsername': telegramUsername,
@@ -1306,6 +1366,7 @@ class AppConfig {
     String? density,
     String? currency,
     String? username,
+    String? fullName,
     String? email,
     String? phoneNumber,
     String? telegramUsername,
@@ -1330,6 +1391,7 @@ class AppConfig {
         density: density ?? this.density,
         currency: currency ?? this.currency,
         username: username ?? this.username,
+        fullName: fullName ?? this.fullName,
         email: email ?? this.email,
         phoneNumber: phoneNumber ?? this.phoneNumber,
         telegramUsername: telegramUsername ?? this.telegramUsername,
@@ -1380,6 +1442,12 @@ class AppData {
 
   /// Every member's tagged transactions, as last fetched from the server.
   final List<GroupTransaction> groupTransactions;
+
+  /// Categories of every group, as last fetched from the server.
+  final List<GroupCategory> groupCategories;
+
+  /// Lower-cased username -> display name, for accounts that set one.
+  final Map<String, String> displayNames;
   final List<InsulinItem> insulinItems;
   final List<InsulinAssign> insulinAssigns;
   final List<InsulinUsage> insulinUsages;
@@ -1401,6 +1469,8 @@ class AppData {
     this.groupMembers = const [],
     this.groupStatusChanges = const [],
     this.groupTransactions = const [],
+    this.groupCategories = const [],
+    this.displayNames = const {},
     this.insulinItems = const [],
     this.insulinAssigns = const [],
     this.insulinUsages = const [],
@@ -1426,6 +1496,8 @@ class AppData {
     required List<GroupMember> groupMembers,
     required List<GroupStatusChange> groupStatusChanges,
     required List<GroupTransaction> groupTransactions,
+    List<GroupCategory>? groupCategories,
+    Map<String, String>? displayNames,
   }) =>
       AppData(
         sources: sources,
@@ -1443,11 +1515,25 @@ class AppData {
         groupMembers: groupMembers,
         groupStatusChanges: groupStatusChanges,
         groupTransactions: groupTransactions,
+        groupCategories: groupCategories ?? this.groupCategories,
+        displayNames: displayNames ?? this.displayNames,
         insulinItems: insulinItems,
         insulinAssigns: insulinAssigns,
         insulinUsages: insulinUsages,
         bloodSugarLogs: bloodSugarLogs,
       );
+
+  /// [username]'s display name (full name / alias), or the username itself
+  /// when the account has not set one.
+  String displayName(String username) =>
+      displayNames[username.toLowerCase()] ?? username;
+
+  /// [groupId]'s categories of [kind], by name.
+  List<GroupCategory> groupCategoriesOf(String groupId, {String? kind}) =>
+      groupCategories
+          .where((c) => c.groupId == groupId && (kind == null || c.kind == kind))
+          .toList()
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
   SpendingGroup? groupById(String? id) =>
       id == null ? null : spendingGroups.where((g) => g.id == id).firstOrNull;
@@ -1501,6 +1587,7 @@ class AppData {
         category: t.category ?? '',
         date: t.date,
         createdBy: username,
+        source: t.source ?? '',
         syncState: 'pending',
       ));
     }
@@ -1516,6 +1603,35 @@ class AppData {
 
 DateTime? _parseStamp(String value) =>
     DateTime.tryParse(value.trim().replaceFirst(' ', 'T'));
+
+/// A proof image (see `ProofService`) waiting for the device to get online, or - for a transaction
+/// saved offline - for that transaction to reach the server first.
+class PendingProof {
+  final String id;
+  final String refType;
+
+  /// The server id of what it belongs to, or the local id of a queued
+  /// transaction while [isLocalRef].
+  final String refId;
+  final bool isLocalRef;
+  final Uint8List bytes;
+
+  const PendingProof({
+    required this.id,
+    required this.refType,
+    required this.refId,
+    required this.isLocalRef,
+    required this.bytes,
+  });
+
+  factory PendingProof.fromMap(Map<String, dynamic> m) => PendingProof(
+        id: m['id'] as String,
+        refType: m['refType'] as String,
+        refId: m['refId'] as String,
+        isLocalRef: (m['isLocalRef'] as int? ?? 0) != 0,
+        bytes: m['bytes'] as Uint8List,
+      );
+}
 
 class PendingDelete {
   final String id;

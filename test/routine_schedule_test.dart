@@ -188,4 +188,110 @@ void main() {
       }
     });
   });
+
+  group('custom repeat', () {
+    test('parses custom:<n>:<unit> and falls back to monthly when broken', () {
+      final r = RoutineRepeat.parse('custom:10:day');
+      expect((r.every, r.unit, r.isCustom), (10, 'day', true));
+      final bad = RoutineRepeat.parse('custom:0:week');
+      expect((bad.every, bad.unit), (1, 'month'));
+    });
+
+    test('labels', () {
+      expect(reminderLabel('monthly'), 'monthly');
+      expect(reminderLabel('custom:1:month'), 'every month');
+      expect(reminderLabel('custom:3:year'), 'every 3 years');
+    });
+
+    test('adds custom periods', () {
+      expect(addReminderPeriod(DateTime(2026, 1, 30), 'custom:10:day'),
+          DateTime(2026, 2, 9));
+      expect(addReminderPeriod(DateTime(2026, 1, 31), 'custom:1:month'),
+          DateTime(2026, 2, 28));
+      expect(addReminderPeriod(DateTime(2026, 3, 5), 'custom:2:year'),
+          DateTime(2028, 3, 5));
+    });
+
+    test('monthly estimate', () {
+      expect(monthlyEstimate(300, 'custom:10:day'), 900);
+      expect(monthlyEstimate(1200, 'custom:1:year'), 100);
+      expect(monthlyEstimate(100, 'quarterly'), closeTo(33.33, 0.01));
+    });
+  });
+
+  group('currentPeriodStart / isPaidThisPeriod', () {
+    final today = DateTime(2026, 9, 24); // a Thursday
+
+    test('fixed choices follow the calendar', () {
+      expect(currentPeriodStart('monthly', today), DateTime(2026, 9, 1));
+      expect(currentPeriodStart('weekly', today), DateTime(2026, 9, 21));
+      expect(currentPeriodStart('bi-monthly', today), DateTime(2026, 9, 1));
+      expect(currentPeriodStart('bi-monthly', DateTime(2026, 10, 3)),
+          DateTime(2026, 9, 1));
+      expect(currentPeriodStart('quarterly', today), DateTime(2026, 7, 1));
+      expect(currentPeriodStart('yearly', today), DateTime(2026, 1, 1));
+    });
+
+    test('custom periods count from the anchor', () {
+      final anchor = DateTime(2026, 9, 1);
+      expect(currentPeriodStart('custom:10:day', today, anchor: anchor),
+          DateTime(2026, 9, 21));
+      expect(
+          currentPeriodStart('custom:2:month', DateTime(2026, 12, 5),
+              anchor: DateTime(2026, 9, 15)),
+          DateTime(2026, 11, 1));
+      expect(
+          currentPeriodStart('custom:2:year', DateTime(2029, 6, 1),
+              anchor: DateTime(2026, 9, 15)),
+          DateTime(2028, 1, 1));
+    });
+
+    test('paid resets when the next period starts', () {
+      bool paid(String reminder, String? last, DateTime on) =>
+          isPaidThisPeriod(
+              reminder: reminder,
+              lastPaidAt: last,
+              createdDate: '2026-01-10T08:00:00.000',
+              today: on);
+      expect(paid('monthly', null, today), isFalse);
+      expect(paid('monthly', '2026-09-01T10:00:00', today), isTrue);
+      expect(paid('monthly', '2026-08-31T23:00:00', today), isFalse);
+      expect(paid('monthly', '2026-09-20T10:00:00', DateTime(2026, 10, 1)),
+          isFalse);
+      expect(paid('yearly', '2026-02-01T10:00:00', today), isTrue);
+      expect(paid('yearly', '2025-12-31T10:00:00', today), isFalse);
+    });
+  });
+
+  group('periodDueDate (group recap)', () {
+    final today = DateTime(2026, 9, 24);
+    test('an unpaid monthly routine is due on the 1st of this month', () {
+      expect(
+          periodDueDate(reminder: 'monthly', lastPaidAt: null, today: today),
+          DateTime(2026, 9, 1));
+    });
+    test('once paid, it is next due on the 1st of next month', () {
+      expect(
+          periodDueDate(
+              reminder: 'monthly',
+              lastPaidAt: '2026-09-03T10:00:00',
+              today: today),
+          DateTime(2026, 10, 1));
+      expect(
+          periodDueDate(
+              reminder: 'weekly', lastPaidAt: '2026-09-22', today: today),
+          DateTime(2026, 9, 28));
+    });
+    test('reminder fires on the due day, then daily while unpaid', () {
+      final due = DateTime(2026, 10, 1);
+      expect(
+          periodReminderFireTime(due,
+              now: DateTime(2026, 9, 24, 12), hour: 9, minute: 0),
+          DateTime(2026, 10, 1, 9));
+      expect(
+          periodReminderFireTime(DateTime(2026, 9, 1),
+              now: DateTime(2026, 9, 24, 12), hour: 9, minute: 0),
+          DateTime(2026, 9, 25, 9));
+    });
+  });
 }

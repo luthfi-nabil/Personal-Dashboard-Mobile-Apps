@@ -8,6 +8,10 @@ import 'models.dart';
 /// Max time to wait for transaction-api / health-api to respond.
 const _requestTimeout = Duration(seconds: 10);
 
+/// Proof images are a few hundred kB; mobile uplinks need longer than the
+/// usual timeout (which would also mark the host unreachable).
+const _uploadTimeout = Duration(seconds: 60);
+
 /// How long one API host keeps counting as unreachable after a request to it
 /// failed to get any answer. See [ApiReachability].
 const _unreachableCooldown = Duration(seconds: 15);
@@ -158,9 +162,15 @@ class RemoteApi {
   /// Logs every outgoing request and its outcome under the 'RemoteApi' tag
   /// (visible in the `flutter run` console / DevTools logging view) so it's
   /// easy to confirm whether the app is actually hitting the APIs.
+  ///
+  /// [body] is only what gets logged. [timeout] is longer for image uploads,
+  /// and [logResponse] is off for responses carrying an image, so the API
+  /// Watcher does not hold on to megabytes of base64.
   Future<dynamic> _send(
       String method, Uri uri, Future<http.Response> Function() request,
-      [Object? body]) async {
+      [Object? body,
+      Duration timeout = _requestTimeout,
+      bool logResponse = true]) async {
     developer.log('→ $method $uri${body != null ? ' $body' : ''}',
         name: 'RemoteApi');
     final requestBody = body != null ? jsonEncode(body) : null;
@@ -183,16 +193,16 @@ class RemoteApi {
     final sw = Stopwatch()..start();
     http.Response res;
     try {
-      res = await request().timeout(_requestTimeout);
+      res = await request().timeout(timeout);
     } on TimeoutException {
-      developer.log('✗ $method $uri timed out after $_requestTimeout',
+      developer.log('✗ $method $uri timed out after $timeout',
           name: 'RemoteApi', level: 1000);
       ApiCallLog.instance.add(ApiCallEntry(
         time: DateTime.now(),
         method: method,
         uri: uri,
         duration: sw.elapsed,
-        error: 'Timed out after ${_requestTimeout.inSeconds}s',
+        error: 'Timed out after ${timeout.inSeconds}s',
         requestBody: requestBody,
       ));
       ApiReachability.instance.markDown(uri);
@@ -223,7 +233,11 @@ class RemoteApi {
       duration: sw.elapsed,
       statusCode: res.statusCode,
       requestBody: requestBody,
-      responseBody: res.body.isEmpty ? null : res.body,
+      responseBody: res.body.isEmpty
+          ? null
+          : logResponse
+              ? res.body
+              : '(${res.body.length} characters, not logged)',
     ));
     return _unwrap(res);
   }
@@ -261,6 +275,7 @@ class RemoteApi {
     String? email,
     String? phoneNumber,
     String? telegramUsername,
+    String? fullName,
   }) async {
     // Tapping Register is the user retrying by hand, so never short-circuit
     // it on a stale unreachable flag.
@@ -271,12 +286,13 @@ class RemoteApi {
       'email': email,
       'phone_number': phoneNumber,
       'telegram_username': telegramUsername,
+      'full_name': fullName,
     }) as Map);
   }
 
   /// `POST /api/auth/login`. Returns an [AuthResponse]-shaped map containing
   /// `token`, `token_type`, `expires_in`, `username`, `user_id`, `email`,
-  /// `phone_number`, and `telegram_username`.
+  /// `phone_number`, `telegram_username` and `full_name`.
   Future<Map<String, dynamic>> login({
     required String username,
     required String password,
@@ -293,6 +309,28 @@ class RemoteApi {
   /// confirm a stored token is still valid and refresh the cached profile.
   Future<Map<String, dynamic>> me() async =>
       Map<String, dynamic>.from(await _get(_authUri('/me')) as Map);
+
+  // ── login-api: profile ─────────────────────────────────────────────────
+  /// `PUT /api/user/profile` on login-api. Sets the signed-in account's
+  /// display name (full name or alias); blank clears it.
+  Future<void> updateProfile({required String fullName}) => _put(
+        _loginUserUri('/profile'),
+        {'full_name': fullName.trim().isEmpty ? null : fullName.trim()},
+      );
+
+  /// `POST /api/user/users/display-names` on login-api. Maps each known
+  /// username to its display name; accounts without one are left out.
+  Future<Map<String, String>> getDisplayNames(List<String> usernames) async {
+    if (usernames.isEmpty) return const {};
+    final rows = _list(await _post(
+        _loginUserUri('/users/display-names'), {'usernames': usernames}));
+    return {
+      for (final row in rows)
+        if ((row['full_name'] as String? ?? '').trim().isNotEmpty)
+          (row['username'] as String? ?? '').toLowerCase():
+              (row['full_name'] as String).trim(),
+    };
+  }
 
   // ── login-api: app settings ────────────────────────────────────────────
   // `app_settings` moved out of transaction-api and is now owned by login-api,
@@ -594,6 +632,29 @@ class RemoteApi {
   Future<List<Map<String, dynamic>>> getGroupTransactions() async =>
       _list(await _get(_txnUri('/group-transactions')));
 
+  /// Categories of every group the user belongs to.
+  Future<List<Map<String, dynamic>>> getGroupCategories() async =>
+      _list(await _get(_txnUri('/group-categories')));
+
+  /// Adds (or renames, for an existing [categoryId]) a group category.
+  /// Group admin only.
+  Future<Map<String, dynamic>> saveGroupCategory({
+    required String groupId,
+    required String categoryId,
+    required String name,
+    required String kind,
+  }) async =>
+      Map<String, dynamic>.from(
+          await _post(_txnUri('/groups/$groupId/categories'), {
+        'category_id': categoryId,
+        'category_name': name,
+        'kind': kind,
+      }) as Map);
+
+  /// Removes a group category. Group admin only.
+  Future<void> deleteGroupCategory(String groupId, String categoryId) =>
+      _delete(_txnUri('/groups/$groupId/categories/$categoryId'));
+
   /// Creates a group led by the user. Posting an id that already exists
   /// renames it, so a write queued offline can be retried safely.
   Future<void> createSpendingGroup({
@@ -679,20 +740,19 @@ class RemoteApi {
       _delete(_txnUri('/groups/$groupId/routines/$routineId'));
 
   /// Pays a group routine out of one of the caller's own sources (recorded
-  /// as the caller's spending, tagged into the group) or, when [sourceId] is
-  /// null, out of the caller's group balance.
+  /// as the caller's spending, tagged into the group).
   Future<void> payGroupRoutine({
     required String groupId,
     required String routineId,
     required String paymentId,
     required double price,
-    String? sourceId,
+    required String sourceId,
   }) =>
       _post(_txnUri('/groups/$groupId/routines/$routineId/payments'), {
         'payment_id': paymentId,
         'price': price,
-        if (sourceId != null) 'source_id': sourceId,
-        'from_group_balance': sourceId == null,
+        'source_id': sourceId,
+        'from_group_balance': false,
       });
 
   /// The leader's items start `planned`; anyone else's start `requested`.
@@ -721,60 +781,201 @@ class RemoteApi {
       _put(_txnUri('/groups/$groupId/planned-expenses/$id/review'),
           {'approve': approve});
 
-  /// Buys a `planned` item out of one of the caller's own sources, or out of
-  /// the caller's group balance when [sourceId] is null.
+  /// Buys a `planned` item out of one of the caller's own sources.
   Future<void> fulfillGroupPlannedExpense({
     required String groupId,
     required String id,
     required String paymentId,
     required double price,
-    String? sourceId,
+    required String sourceId,
   }) =>
       _put(_txnUri('/groups/$groupId/planned-expenses/$id/fulfill'), {
         'payment_id': paymentId,
         'price': price,
-        if (sourceId != null) 'source_id': sourceId,
-        'from_group_balance': sourceId == null,
+        'source_id': sourceId,
+        'from_group_balance': false,
       });
 
   Future<void> cancelGroupPlannedExpense(String groupId, String id) =>
       _delete(_txnUri('/groups/$groupId/planned-expenses/$id'));
 
-  // ── transaction-api: group member balances ─────────────────────────────
-  /// Everyone's balance for the leader, only the caller's for anyone else.
-  Future<Map<String, dynamic>> getGroupBalances(String groupId) async =>
+  // ── transaction-api: group target spendings ────────────────────────────
+  /// Every member's monthly target for the leader, only the caller's for
+  /// anyone else, plus whether the leader has targets switched on.
+  Future<Map<String, dynamic>> getGroupTargets(String groupId) async =>
       Map<String, dynamic>.from(
-          await _get(_txnUri('/groups/$groupId/balances')) as Map);
+          await _get(_txnUri('/groups/$groupId/targets')) as Map);
 
-  /// Adds to the caller's own group balance - never anyone else's.
-  Future<void> topUpGroupBalance({
+  /// Sets the caller's own monthly target (zero clears it). Answers with the
+  /// group's targets as [getGroupTargets] does.
+  Future<Map<String, dynamic>> setGroupTarget(
+          String groupId, double amount) async =>
+      Map<String, dynamic>.from(
+          await _put(_txnUri('/groups/$groupId/target'), {'amount': amount})
+              as Map);
+
+  /// Leader-only switch for the whole group's target spendings.
+  Future<Map<String, dynamic>> setGroupTargetsEnabled(
+          String groupId, bool enabled) async =>
+      Map<String, dynamic>.from(await _put(
+              _txnUri('/groups/$groupId/target-setting'), {'enabled': enabled})
+          as Map);
+
+  // ── transaction-api: proof images ──────────────────────────────────────
+  /// Attaches a compressed image to a `spending` / `earning` of the caller
+  /// or to a `reimbursement` / `split_payment` they take part in.
+  /// [proofId] is client-generated so a retry stores it once.
+  Future<Map<String, dynamic>> uploadProof({
+    required String proofId,
+    required String refType,
+    required String refId,
+    required String imageBase64,
+    String mimeType = 'image/jpeg',
+  }) async {
+    final uri = _txnUri('/proofs');
+    final body = {
+      'proof_id': proofId,
+      'ref_type': refType,
+      'ref_id': refId,
+      'mime_type': mimeType,
+      'image_base64': imageBase64,
+    };
+    return Map<String, dynamic>.from(await _send(
+      'POST',
+      uri,
+      () => http.post(uri, headers: _headers(), body: jsonEncode(body)),
+      {...body, 'image_base64': '(${imageBase64.length} characters)'},
+      _uploadTimeout,
+    ) as Map);
+  }
+
+  /// The proofs of one record the caller may see, without their images.
+  Future<List<Map<String, dynamic>>> getProofs(
+          String refType, String refId) async =>
+      _list(await _get(
+          _txnUri('/proofs', {'ref_type': refType, 'ref_id': refId})));
+
+  /// One proof with its `image_base64`.
+  Future<Map<String, dynamic>> getProof(String proofId) async {
+    final uri = _txnUri('/proofs/$proofId');
+    return Map<String, dynamic>.from(await _send(
+      'GET',
+      uri,
+      () => http.get(uri, headers: _headers()),
+      null,
+      _uploadTimeout,
+      false,
+    ) as Map);
+  }
+
+  Future<void> deleteProof(String proofId) =>
+      _delete(_txnUri('/proofs/$proofId'));
+
+  // ── transaction-api: reimbursements & split bills ──────────────────────
+  /// Every reimbursement, split share and split payment of the group, plus
+  /// its saved names of people outside the app.
+  Future<Map<String, dynamic>> getGroupSettlements(String groupId) async =>
+      Map<String, dynamic>.from(
+          await _get(_txnUri('/groups/$groupId/settlements')) as Map);
+
+  /// Pays the owner of a group spending back [amount], from one of the
+  /// caller's sources into the owner's [toSourceId].
+  Future<void> reimburseGroupTransaction({
     required String groupId,
-    required String entryId,
+    required String reimbursementId,
+    required String transactionId,
+    required String fromSourceId,
     required double amount,
+    required String toSourceId,
     String description = '',
   }) =>
-      _post(_txnUri('/groups/$groupId/balance/top-ups'), {
-        'entry_id': entryId,
-        'amount': amount,
+      _post(_txnUri('/groups/$groupId/reimbursements'), {
+        'reimbursement_id': reimbursementId,
+        'transaction_id': transactionId,
+        'from_source_id': fromSourceId,
+        'from_group_balance': false,
+        'personal_amount': amount,
+        'to_source_id': toSourceId,
+        'return_balance': false,
         'description': description,
       });
 
-  /// A group transaction paid from the caller's group balance.
-  Future<void> spendGroupBalance({
+  /// A share of the caller's group spending for a group member ([username])
+  /// or for anyone by [name].
+  Future<void> addGroupSplitShare({
     required String groupId,
-    required String entryId,
+    required String shareId,
+    required String transactionId,
+    String? username,
+    String? name,
     required double amount,
-    required String categoryId,
-    required String category,
-    String description = '',
   }) =>
-      _post(_txnUri('/groups/$groupId/balance/spendings'), {
-        'entry_id': entryId,
+      _post(_txnUri('/groups/$groupId/split-shares'), {
+        'share_id': shareId,
+        'transaction_id': transactionId,
+        if (username != null) 'username': username,
+        if (name != null) 'name': name,
         'amount': amount,
-        'description': description,
-        'spending_category_id': categoryId,
-        'spending_category': category,
       });
+
+  Future<void> removeGroupSplitShare(String groupId, String shareId) =>
+      _delete(_txnUri('/groups/$groupId/split-shares/$shareId'));
+
+  /// The caller pays part of their share from [fromSourceId]. It waits for
+  /// the owner's approval.
+  Future<void> payGroupSplitShare({
+    required String groupId,
+    required String shareId,
+    required String paymentId,
+    required double amount,
+    required String fromSourceId,
+    String note = '',
+  }) =>
+      _post(_txnUri('/groups/$groupId/split-shares/$shareId/payments'), {
+        'payment_id': paymentId,
+        'amount': amount,
+        'from_source_id': fromSourceId,
+        'from_group_balance': false,
+        'note': note,
+      });
+
+  /// The owner records money received from a name-only person, into
+  /// [toSourceId].
+  Future<void> recordGroupSplitPayment({
+    required String groupId,
+    required String shareId,
+    required String paymentId,
+    required double amount,
+    required String toSourceId,
+    String note = '',
+  }) =>
+      _post(_txnUri('/groups/$groupId/split-shares/$shareId/manual-payments'), {
+        'payment_id': paymentId,
+        'amount': amount,
+        'to_source_id': toSourceId,
+        'to_group_balance': false,
+        'note': note,
+      });
+
+  /// The owner approves (money lands in [toSourceId]) or rejects a pending
+  /// split payment.
+  Future<void> reviewGroupSplitPayment({
+    required String groupId,
+    required String paymentId,
+    required bool approve,
+    String? toSourceId,
+  }) =>
+      _put(_txnUri('/groups/$groupId/split-payments/$paymentId/review'), {
+        'approve': approve,
+        if (toSourceId != null) 'to_source_id': toSourceId,
+        'to_group_balance': false,
+      });
+
+  Future<void> withdrawGroupSplitPayment(String groupId, String paymentId) =>
+      _delete(_txnUri('/groups/$groupId/split-payments/$paymentId'));
+
+  Future<void> forgetGroupName(String groupId, String name) =>
+      _delete(_txnUri('/groups/$groupId/names/${Uri.encodeComponent(name)}'));
 
   // ── transaction-api: transfers to group members ─────────────────────────
   /// Source names of a group mate, to pick where a transfer lands.
@@ -803,6 +1004,60 @@ class RemoteApi {
         if (createdDate != null && createdDate.isNotEmpty)
           'created_date': createdDate,
       });
+
+  // ── transaction-api: fund requests ─────────────────────────────────────
+  /// `{requests: [...], balances: [...]}` across all the caller's groups.
+  Future<Map<String, dynamic>> getFundRequests() async {
+    final data = await _get(_txnUri('/fund-requests'));
+    return data is Map ? Map<String, dynamic>.from(data) : <String, dynamic>{};
+  }
+
+  /// `kind` `request` asks [username] for money; `send` sends it now.
+  Future<void> createFundRequest({
+    required String groupId,
+    required String requestId,
+    required String kind,
+    required String username,
+    required double amount,
+    required String tag,
+    String note = '',
+    bool tracked = false,
+    String? toSourceId,
+    String? fromSourceId,
+  }) =>
+      _post(_txnUri('/groups/$groupId/fund-requests'), {
+        'request_id': requestId,
+        'kind': kind,
+        'username': username,
+        'amount': amount,
+        'tag': tag,
+        'note': note,
+        'tracked': tracked,
+        if (toSourceId != null) 'to_source_id': toSourceId,
+        if (fromSourceId != null) 'from_source_id': fromSourceId,
+      });
+
+  Future<void> fulfillFundRequest({
+    required String groupId,
+    required String requestId,
+    required String fromSourceId,
+    String? toSourceId,
+  }) =>
+      _put(_txnUri('/groups/$groupId/fund-requests/$requestId/fulfill'), {
+        'from_source_id': fromSourceId,
+        if (toSourceId != null) 'to_source_id': toSourceId,
+      });
+
+  Future<void> rejectFundRequest(String groupId, String requestId) =>
+      _put(_txnUri('/groups/$groupId/fund-requests/$requestId/reject'), {});
+
+  Future<void> cancelFundRequest(String groupId, String requestId) =>
+      _delete(_txnUri('/groups/$groupId/fund-requests/$requestId'));
+
+  Future<void> waiveFundRequest(String groupId, String requestId,
+          {String note = ''}) =>
+      _put(_txnUri('/groups/$groupId/fund-requests/$requestId/waive'),
+          {'note': note});
 
   // ── transaction-api: investments ───────────────────────────────────────
   Future<List<Map<String, dynamic>>> getInvestments() async =>

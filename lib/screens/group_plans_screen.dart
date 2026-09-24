@@ -1,24 +1,23 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/group_models.dart';
 import '../core/group_service.dart';
 import '../core/models.dart';
+import '../core/money_input.dart';
 import '../core/remote_api.dart';
+import '../core/routine_schedule.dart';
 import '../core/utils.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
-import 'group_balance_screen.dart';
+import '../widgets/routine_widgets.dart';
 
 /// Group routines, their payments and planned expenses, fetched live.
 final groupPlansProvider = FutureProvider.autoDispose<GroupPlans>((ref) {
   ref.watch(configProvider.select((cfg) => cfg.userId));
   return GroupService.instance.loadPlans();
 });
-
-const _reminders = ['weekly', 'monthly', 'bi-monthly', 'quarterly', 'yearly'];
 
 /// A group's shared routines and planned expenses.
 ///
@@ -88,33 +87,19 @@ class GroupPlansScreen extends ConsumerWidget {
                             style: TextStyle(color: c.muted)))
                     : plansAsync.when(
                         loading: () => Center(
-                            child:
-                                CircularProgressIndicator(color: c.accent)),
+                            child: CircularProgressIndicator(color: c.accent)),
                         error: (e, _) => _ErrorPanel(
                           message: e is ApiException ? e.message : '$e',
                           c: c,
                           onRetry: () => ref.invalidate(groupPlansProvider),
                         ),
-                        data: (plans) => TabBarView(
+                        data: (plans) => Column(
                           children: [
-                            _RoutinesTab(
-                              group: group,
-                              data: data,
-                              plans: plans,
-                              isLeader: isLeader,
-                              me: me,
-                              currency: cfg.currency,
-                              c: c,
-                            ),
-                            _PlannedTab(
-                              group: group,
-                              data: data,
-                              plans: plans,
-                              isLeader: isLeader,
-                              me: me,
-                              currency: cfg.currency,
-                              c: c,
-                            ),
+                            if (plans.cachedAt != null)
+                              OfflineCopyBanner(savedAt: plans.cachedAt!, c: c),
+                            Expanded(
+                                child: _tabs(plans, group, data, isLeader, me,
+                                    cfg.currency, c)),
                           ],
                         ),
                       ),
@@ -122,6 +107,58 @@ class GroupPlansScreen extends ConsumerWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _tabs(GroupPlans plans, SpendingGroup group, AppData data,
+          bool isLeader, String me, String currency, AppColors c) =>
+      TabBarView(
+        children: [
+          _RoutinesTab(
+            group: group,
+            data: data,
+            plans: plans,
+            isLeader: isLeader,
+            me: me,
+            currency: currency,
+            c: c,
+          ),
+          _PlannedTab(
+            group: group,
+            data: data,
+            plans: plans,
+            isLeader: isLeader,
+            me: me,
+            currency: currency,
+            c: c,
+          ),
+        ],
+      );
+}
+
+/// Shown above data read from the copy saved on the device: when it was
+/// saved, and that changes need a connection.
+class OfflineCopyBanner extends StatelessWidget {
+  final String savedAt;
+  final AppColors c;
+  const OfflineCopyBanner({super.key, required this.savedAt, required this.c});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: c.surface2,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        'Offline - showing the copy saved on this device '
+        '(${fmtDate(savedAt, 'long')} ${fmtDate(savedAt, 'time')}). '
+        'Paying or editing needs a connection.',
+        style: TextStyle(fontSize: 12, color: c.muted, height: 1.35),
       ),
     );
   }
@@ -144,7 +181,6 @@ Future<bool> _run(
   }
   ref.invalidate(groupPlansProvider);
   if (movedMoney) {
-    ref.invalidate(groupBalancesProvider);
     await ref.read(appDataProvider.notifier).refreshFromServer();
   }
   if (context.mounted) _snack(context, done);
@@ -154,6 +190,19 @@ Future<bool> _run(
 void _snack(BuildContext context, String message) =>
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
+
+/// The group's own spending categories - routines and planned expenses are
+/// filed under these, like every other transaction added to the group.
+List<Category> _groupSpendingCategories(AppData data, String groupId) => [
+      for (final cat in data.groupCategoriesOf(groupId, kind: 'spending'))
+        Category(
+          id: cat.id,
+          name: cat.name,
+          kind: cat.kind,
+          syncState: 'synced',
+          updatedAt: '',
+        ),
+    ];
 
 // ── Routines ──────────────────────────────────────────────────────────────
 
@@ -263,8 +312,8 @@ class _RoutinesTab extends ConsumerWidget {
     await _run(
       context,
       ref,
-      () => GroupService.instance.payRoutine(routine,
-          price: result.price, sourceId: result.sourceId),
+      () => GroupService.instance
+          .payRoutine(routine, price: result.price, sourceId: result.sourceId),
       done: 'Paid ${routine.itemName}.',
       movedMoney: true,
     );
@@ -277,8 +326,7 @@ class _RoutinesTab extends ConsumerWidget {
       builder: (_) => _ItemDialog(
         title: existing == null ? 'New group routine' : 'Edit routine',
         action: existing == null ? 'Add' : 'Save',
-        categories:
-            data.categories.where((cat) => cat.kind == 'spending').toList(),
+        categories: _groupSpendingCategories(data, group.id),
         withReminder: true,
         initial: existing == null
             ? null
@@ -351,6 +399,7 @@ class _RoutineTile extends StatelessWidget {
         ? 'Not paid yet'
         : 'Last paid ${fmtDate(routine.lastPaidAt!, 'long')} by '
             '${routine.lastPaidBy == me ? 'you' : routine.lastPaidBy}';
+    final paid = groupRoutinePaid(routine, DateTime.now());
     return _Card(
       c: c,
       child: Row(
@@ -359,14 +408,24 @@ class _RoutineTile extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(routine.itemName,
-                    style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: c.ink)),
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(routine.itemName,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: c.ink)),
+                    ),
+                    const SizedBox(width: 8),
+                    PaidStatusChip(paid: paid, c: c),
+                  ],
+                ),
                 const SizedBox(height: 3),
                 Text(
-                  '${fmtRp(routine.price, currency)} · ${routine.reminder}'
+                  '${fmtRp(routine.price, currency)} · '
+                  '${reminderLabel(routine.reminder)}'
                   '${routine.category.isEmpty ? '' : ' · ${routine.category}'}',
                   style: TextStyle(fontSize: 12, color: c.ink2),
                 ),
@@ -512,8 +571,7 @@ class _PlannedTab extends ConsumerWidget {
       builder: (_) => _ItemDialog(
         title: isLeader ? 'New planned expense' : 'Request a planned expense',
         action: isLeader ? 'Add' : 'Send request',
-        categories:
-            data.categories.where((cat) => cat.kind == 'spending').toList(),
+        categories: _groupSpendingCategories(data, group.id),
         withNotes: true,
       ),
     );
@@ -610,10 +668,9 @@ class _PlannedTile extends StatelessWidget {
       _ => ('Canceled', c.muted),
     };
     final detail = switch (item.status) {
-      'fulfilled' =>
-        'Bought by ${_who(item.fulfilledBy ?? '')} for '
-            '${fmtRp(item.fulfilledPrice ?? item.price, currency)}'
-            '${item.fulfilledAt == null ? '' : ' · ${fmtDate(item.fulfilledAt!, 'long')}'}',
+      'fulfilled' => 'Bought by ${_who(item.fulfilledBy ?? '')} for '
+          '${fmtRp(item.fulfilledPrice ?? item.price, currency)}'
+          '${item.fulfilledAt == null ? '' : ' · ${fmtDate(item.fulfilledAt!, 'long')}'}',
       'rejected' => 'Rejected by ${_who(item.reviewedBy ?? '')}',
       _ => 'Requested by ${_who(item.requestedBy)}'
           '${item.reviewedBy != null && item.reviewedBy != item.requestedBy ? ' · approved by ${_who(item.reviewedBy!)}' : ''}',
@@ -660,16 +717,12 @@ class _PlannedTile extends StatelessWidget {
 class _Payment {
   final double price;
 
-  /// One of the user's own sources, or null for their group balance.
-  final String? sourceId;
+  /// One of the user's own sources.
+  final String sourceId;
   const _Payment(this.price, this.sourceId);
 }
 
-/// Dropdown value standing for "my balance in this group".
-const _groupBalanceChoice = '__group_balance__';
-
-/// Asks how much was paid and where it comes from: one of the user's own
-/// sources, or their balance in this group.
+/// Asks how much was paid and which of the user's own sources it came from.
 class _PayDialog extends StatefulWidget {
   final String title;
   final double price;
@@ -689,7 +742,7 @@ class _PayDialog extends StatefulWidget {
 
 class _PayDialogState extends State<_PayDialog> {
   late final TextEditingController _price =
-      TextEditingController(text: _formatAmount(widget.price));
+      TextEditingController(text: formatMoneyInput(widget.price));
   String? _choice;
 
   @override
@@ -700,9 +753,9 @@ class _PayDialogState extends State<_PayDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final price = _parseAmount(_price.text);
-    final canPay = price != null && price > 0 && _choice != null;
-    final fromBalance = _choice == _groupBalanceChoice;
+    final price = parseMoney(_price.text);
+    final choice = _choice;
+    final canPay = price != null && price > 0 && choice != null;
     return AlertDialog(
       title: Text(widget.title),
       content: Column(
@@ -712,9 +765,7 @@ class _PayDialogState extends State<_PayDialog> {
           TextField(
             controller: _price,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            inputFormatters: [
-              FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
-            ],
+            inputFormatters: moneyInputFormatters,
             decoration: const InputDecoration(labelText: 'Amount paid'),
             onChanged: (_) => setState(() {}),
           ),
@@ -724,9 +775,6 @@ class _PayDialogState extends State<_PayDialog> {
             isExpanded: true,
             decoration: const InputDecoration(labelText: 'Pay from'),
             items: [
-              const DropdownMenuItem(
-                  value: _groupBalanceChoice,
-                  child: Text('My group balance')),
               for (final s in widget.sources)
                 DropdownMenuItem(value: s.id, child: Text(s.name)),
             ],
@@ -734,12 +782,8 @@ class _PayDialogState extends State<_PayDialog> {
           ),
           const SizedBox(height: 10),
           Text(
-              fromBalance
-                  ? 'Taken from your balance in ${widget.groupName} and '
-                      'added to its transactions. Your own sources are not '
-                      'touched.'
-                  : 'Saved as your spending and added to '
-                      '${widget.groupName}\'s transactions.',
+              'Saved as your spending and added to '
+              '${widget.groupName}\'s transactions.',
               style: const TextStyle(fontSize: 12, color: Colors.grey)),
         ],
       ),
@@ -749,8 +793,7 @@ class _PayDialogState extends State<_PayDialog> {
             child: const Text('Cancel')),
         TextButton(
           onPressed: canPay
-              ? () => Navigator.pop(
-                  context, _Payment(price, fromBalance ? null : _choice))
+              ? () => Navigator.pop(context, _Payment(price, choice))
               : null,
           child: const Text('Pay'),
         ),
@@ -803,13 +846,15 @@ class _ItemDialogState extends State<_ItemDialog> {
   late final TextEditingController _name =
       TextEditingController(text: widget.initial?.name ?? '');
   late final TextEditingController _price = TextEditingController(
-      text: widget.initial == null ? '' : _formatAmount(widget.initial!.price));
+      text: widget.initial == null
+          ? ''
+          : formatMoneyInput(widget.initial!.price));
   late final TextEditingController _notes =
       TextEditingController(text: widget.initial?.notes ?? '');
-  late String? _categoryId = widget.categories
-          .any((cat) => cat.id == widget.initial?.categoryId)
-      ? widget.initial!.categoryId
-      : null;
+  late String? _categoryId =
+      widget.categories.any((cat) => cat.id == widget.initial?.categoryId)
+          ? widget.initial!.categoryId
+          : null;
   late String _reminder = widget.initial?.reminder ?? 'monthly';
 
   @override
@@ -822,7 +867,7 @@ class _ItemDialogState extends State<_ItemDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final price = _parseAmount(_price.text);
+    final price = parseMoney(_price.text);
     final category =
         widget.categories.where((cat) => cat.id == _categoryId).firstOrNull;
     final valid = _name.text.trim().isNotEmpty &&
@@ -846,16 +891,21 @@ class _ItemDialogState extends State<_ItemDialog> {
               controller: _price,
               keyboardType:
                   const TextInputType.numberWithOptions(decimal: true),
-              inputFormatters: [
-                FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
-              ],
+              inputFormatters: moneyInputFormatters,
               decoration: const InputDecoration(labelText: 'Price'),
               onChanged: (_) => setState(() {}),
             ),
             DropdownButtonFormField<String>(
               initialValue: _categoryId,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Category'),
+              decoration: InputDecoration(
+                labelText: 'Group category',
+                helperText: widget.categories.isEmpty
+                    ? 'This group has no spending categories yet. The '
+                        'group admin adds them under Categories.'
+                    : null,
+                helperMaxLines: 3,
+              ),
               items: [
                 for (final cat in widget.categories)
                   DropdownMenuItem(value: cat.id, child: Text(cat.name)),
@@ -863,14 +913,9 @@ class _ItemDialogState extends State<_ItemDialog> {
               onChanged: (v) => setState(() => _categoryId = v),
             ),
             if (widget.withReminder)
-              DropdownButtonFormField<String>(
-                initialValue: _reminder,
-                decoration: const InputDecoration(labelText: 'Repeats'),
-                items: [
-                  for (final r in _reminders)
-                    DropdownMenuItem(value: r, child: Text(r)),
-                ],
-                onChanged: (v) => setState(() => _reminder = v ?? 'monthly'),
+              RepeatPicker(
+                initial: _reminder,
+                onChanged: (v) => setState(() => _reminder = v),
               ),
             if (widget.withNotes)
               TextField(
@@ -928,13 +973,6 @@ Future<bool> _confirm(BuildContext context,
   return ok == true;
 }
 
-String _formatAmount(double value) => value == value.roundToDouble()
-    ? value.round().toString()
-    : value.toStringAsFixed(2);
-
-double? _parseAmount(String text) =>
-    double.tryParse(text.trim().replaceAll(',', '.'));
-
 // ── Small building blocks ─────────────────────────────────────────────────
 
 class _Card extends StatelessWidget {
@@ -988,8 +1026,7 @@ class _Row extends StatelessWidget {
                         fontWeight: FontWeight.w500,
                         color: c.ink)),
                 const SizedBox(height: 2),
-                Text(subtitle,
-                    style: TextStyle(fontSize: 12, color: c.muted)),
+                Text(subtitle, style: TextStyle(fontSize: 12, color: c.muted)),
               ],
             ),
           ),
@@ -1073,8 +1110,7 @@ class _ErrorPanel extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(message,
-                textAlign: TextAlign.center,
-                style: TextStyle(color: c.muted)),
+                textAlign: TextAlign.center, style: TextStyle(color: c.muted)),
             const SizedBox(height: 10),
             TextButton(onPressed: onRetry, child: const Text('Retry')),
           ],

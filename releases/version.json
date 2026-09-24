@@ -1,9 +1,9 @@
 {
-    "version":  "1.1.0",
-    "build":  2,
-    "apk":  "personal-dashboard-1.1.0-2.apk",
-    "sha256":  "7e5e748140ea93c2d9e31405bc075b44236436ce123746da24fdd1a7dbc2b45e",
-    "size":  94504646,
-    "notes":  "In-app updates; group features",
-    "releaseDate":  "2026-09-23T12:03:27.8679371Z"
+    "version":  "1.4.0",
+    "build":  6,
+    "apk":  "personal-dashboard-1.4.0-6.apk",
+    "sha256":  "9550d9c71aac7eec552f06d4c9e5dafdd2eb8101972ec9c8021b46db5d4e5cf7",
+    "size":  98929398,
+    "notes":  "Paid/Not Paid routines, custom repeat, offline group plans, routines due in recap, request funds",
+    "releaseDate":  "2026-09-24T11:20:11.4477665Z"
 }

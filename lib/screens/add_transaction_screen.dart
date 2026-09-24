@@ -6,12 +6,15 @@ import 'package:uuid/uuid.dart';
 import '../core/group_models.dart';
 import '../core/group_service.dart';
 import '../core/models.dart';
+import '../core/money_input.dart';
+import '../core/proof_service.dart';
 import '../core/receipt_scanner.dart';
 import '../core/repo.dart';
 import '../core/remote_api.dart';
 import '../core/utils.dart';
 import '../theme/app_theme.dart';
 import '../providers/providers.dart';
+import '../widgets/proof_widgets.dart';
 
 /// Pre-filled content for [AddTransactionScreen], passed as go_router `extra`.
 ///
@@ -23,10 +26,15 @@ class AddTransactionDraft {
   final String description;
   final double? amount;
 
+  /// The scanned bill's photo, when the user chose to attach it as the
+  /// transaction's proof. Raw bytes; the screen compresses them.
+  final Uint8List? receiptPhoto;
+
   const AddTransactionDraft({
     this.details = const [],
     this.description = '',
     this.amount,
+    this.receiptPhoto,
   });
 }
 
@@ -79,6 +87,10 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   /// Line items saved alongside the spending as its "transaction detail".
   final List<TransactionDetail> _details = [];
 
+  /// Proof picture (already compressed), uploaded with the transaction.
+  Uint8List? _proof;
+  bool _compressingReceipt = false;
+
   @override
   void initState() {
     super.initState();
@@ -90,7 +102,25 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     _details.addAll(draft.details);
     if (draft.description.isNotEmpty) _descCtl.text = draft.description;
     final amount = draft.amount ?? _detailsTotal;
-    if (amount > 0) _amtCtl.text = _formatAmount(amount);
+    if (amount > 0) _amtCtl.text = formatMoneyInput(amount);
+
+    final photo = draft.receiptPhoto;
+    if (photo != null) {
+      _compressingReceipt = true;
+      ProofService.instance.compress(photo).then(
+        (bytes) {
+          if (mounted) {
+            setState(() {
+              _proof = bytes;
+              _compressingReceipt = false;
+            });
+          }
+        },
+        onError: (Object _) {
+          if (mounted) setState(() => _compressingReceipt = false);
+        },
+      );
+    }
   }
 
   @override
@@ -105,15 +135,11 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   double get _detailsTotal =>
       _details.fold<double>(0, (sum, d) => sum + d.checkedTotal);
 
-  static String _formatAmount(double value) => value == value.roundToDouble()
-      ? value.round().toString()
-      : value.toStringAsFixed(2);
-
   /// Keeps the amount field in step with the breakdown whenever items change,
   /// so the header total can never silently disagree with its detail.
   void _syncAmountFromDetails() {
     if (_details.isEmpty) return;
-    _amtCtl.text = _formatAmount(_detailsTotal);
+    _amtCtl.text = formatMoneyInput(_detailsTotal);
   }
 
   Future<void> _editDetail({TransactionDetail? existing}) async {
@@ -206,7 +232,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       return;
     }
 
-    final amount = double.tryParse(_amtCtl.text.replaceAll(',', '.')) ?? 0;
+    final amount = parseMoney(_amtCtl.text) ?? 0;
     final description = _descCtl.text.trim();
     final activeGroupIds = data.activeGroups.map((g) => g.id).toSet();
     final groupId = _type != 'transfer' && _addToGroup
@@ -224,8 +250,8 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       var savedLocally = false;
       switch (_type) {
         case 'earning':
-          final category = data.categories
-              .firstWhere((c) => c.kind == 'earning' && c.name == _category);
+          final category = _categoriesFor(data)
+              .firstWhere((c) => c.name == _category);
           final source = data.sources.firstWhere((s) => s.name == _source);
           savedLocally = await Repo.instance.createEarning(
             amount: amount,
@@ -233,11 +259,12 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             category: category,
             source: source,
             groupId: groupId,
+            proof: _proof,
           );
           break;
         case 'spending':
-          final category = data.categories
-              .firstWhere((c) => c.kind == 'spending' && c.name == _category);
+          final category = _categoriesFor(data)
+              .firstWhere((c) => c.name == _category);
           final source = data.sources.firstWhere((s) => s.name == _source);
           savedLocally = await Repo.instance.createSpending(
             amount: amount,
@@ -246,6 +273,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             source: source,
             details: _details,
             groupId: groupId,
+            proof: _proof,
           );
           break;
         case 'transfer' when _toMember:
@@ -268,6 +296,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             description: description,
             fromSource: from,
             toSource: to,
+            proof: _proof,
           );
           break;
       }
@@ -298,6 +327,33 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     }
   }
 
+  /// The group the transaction goes into, when the group switch is on and
+  /// the picked group can still take transactions.
+  String? _activeGroupId(AppData data) {
+    if (_type == 'transfer' || !_addToGroup) return null;
+    return data.activeGroups.any((g) => g.id == _groupId) ? _groupId : null;
+  }
+
+  /// Categories offered for the current type: the group's own categories
+  /// while the group switch is on (a group transaction is filed under those,
+  /// and shows them in the personal history too), otherwise the user's.
+  List<Category> _categoriesFor(AppData data) {
+    final groupId = _activeGroupId(data);
+    if (groupId == null) {
+      return data.categories.where((cat) => cat.kind == _type).toList();
+    }
+    return [
+      for (final cat in data.groupCategoriesOf(groupId, kind: _type))
+        Category(
+          id: cat.id,
+          name: cat.name,
+          kind: cat.kind,
+          syncState: 'synced',
+          updatedAt: '',
+        ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = AppTheme.colorsOf(context);
@@ -319,8 +375,8 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
           }
         }
 
-        final filteredCats =
-            data.categories.where((cat) => cat.kind == _type).toList();
+        final filteredCats = _categoriesFor(data);
+        final groupForCategories = _activeGroupId(data);
         if (_category.isNotEmpty &&
             !filteredCats.any((cat) => cat.name == _category)) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -437,10 +493,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
                             controller: _amtCtl,
                             keyboardType: const TextInputType.numberWithOptions(
                                 decimal: true),
-                            inputFormatters: [
-                              FilteringTextInputFormatter.allow(
-                                  RegExp(r'[0-9.,]'))
-                            ],
+                            inputFormatters: moneyInputFormatters,
                             style: TextStyle(
                                 fontSize: 32,
                                 fontWeight: FontWeight.w700,
@@ -457,7 +510,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
                             ),
                             validator: (v) {
                               if (v == null || v.isEmpty) return 'Required';
-                              final n = double.tryParse(v.replaceAll(',', '.'));
+                              final n = parseMoney(v);
                               if (n == null || n <= 0)
                                 return 'Enter a valid amount';
                               return null;
@@ -577,17 +630,10 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
                           onChanged: (v) => setState(() => _source = v ?? ''),
                         )),
                     const SizedBox(height: 14),
-                    _Field(
-                        label: 'Category',
-                        child: _CategoryDropdown(
-                          value: _category,
-                          categories: filteredCats,
-                          c: c,
-                          onChanged: (v) => setState(() => _category = v ?? ''),
-                        )),
-                    const SizedBox(height: 14),
                     // Only shown while some group is switched on; a group the
-                    // leader turned off stops being offered here.
+                    // leader turned off stops being offered here. Picked
+                    // before the category, because a group transaction uses
+                    // the group's categories.
                     if (data.activeGroups.isNotEmpty) ...[
                       _GroupPicker(
                         groups: data.activeGroups,
@@ -607,6 +653,29 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
                       ),
                       const SizedBox(height: 14),
                     ],
+                    _Field(
+                        label: groupForCategories == null
+                            ? 'Category'
+                            : 'Group category',
+                        child: _CategoryDropdown(
+                          value: _category,
+                          categories: filteredCats,
+                          c: c,
+                          onChanged: (v) => setState(() => _category = v ?? ''),
+                        )),
+                    if (groupForCategories != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        filteredCats.isEmpty
+                            ? 'This group has no $_type categories yet. Ask '
+                                'the group admin to add one.'
+                            : 'Uses ${data.groupById(groupForCategories)?.name ?? 'the group'}\'s '
+                                'categories, and counts towards your target '
+                                'spending there.',
+                        style: TextStyle(fontSize: 12, color: c.muted),
+                      ),
+                    ],
+                    const SizedBox(height: 14),
                     if (_type == 'spending')
                       _DetailSection(
                         details: _details,
@@ -618,6 +687,21 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
                         onToggle: _toggleDetail,
                         onScan: ReceiptScanner.isSupported
                             ? () => context.push('/scan-receipt')
+                            : null,
+                      ),
+                  ],
+                  // A transfer to a member is booked by the server in one
+                  // go, with nothing of the user's to attach a proof to.
+                  if (!(_type == 'transfer' && _toMember)) ...[
+                    const SizedBox(height: 14),
+                    if (_compressingReceipt)
+                      LinearProgressIndicator(color: c.accent)
+                    else
+                      ProofPickerField(
+                        image: _proof,
+                        onChanged: (v) => setState(() => _proof = v),
+                        hint: _type == 'transfer'
+                            ? 'A photo of the transfer receipt.'
                             : null,
                       ),
                   ],
@@ -768,6 +852,17 @@ class _ReadOnlyTransactionView extends ConsumerWidget {
                 ],
               ),
             ),
+            const SizedBox(height: 16),
+            // A transaction still queued offline has no server id yet; its
+            // proof waits on the device until it syncs.
+            if (t.syncState == 'pending')
+              PendingProofStrip(localTransactionId: t.id)
+            else
+              ProofGallery(
+                proofRef: proofRefOf(t).ref,
+                refId: proofRefOf(t).id,
+                canAdd: true,
+              ),
             if (details.isNotEmpty) ...[
               const SizedBox(height: 16),
               _ReadOnlyDetailList(
@@ -1296,7 +1391,9 @@ class _CategoryDropdown extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DropdownButtonFormField<String>(
-      value: value.isEmpty ? null : value,
+      // The list changes with the type and the group switch; a pick that is
+      // no longer in it shows as empty until the screen clears it.
+      value: categories.any((cat) => cat.name == value) ? value : null,
       hint: Text('— none —', style: TextStyle(color: c.muted)),
       decoration: InputDecoration(
         filled: true,
@@ -1833,7 +1930,7 @@ class _DetailEditorSheetState extends State<_DetailEditorSheet> {
     _nameCtl = TextEditingController(text: d?.itemName ?? '');
     _qtyCtl = TextEditingController(text: _fmt(d?.quantity ?? 1));
     _priceCtl =
-        TextEditingController(text: d == null ? '' : _fmt(d.unitPrice));
+        TextEditingController(text: d == null ? '' : formatMoneyInput(d.unitPrice));
     _noteCtl = TextEditingController(text: d?.note ?? '');
   }
 
@@ -1854,8 +1951,7 @@ class _DetailEditorSheetState extends State<_DetailEditorSheet> {
     final name = _nameCtl.text.trim();
     final quantity =
         double.tryParse(_qtyCtl.text.replaceAll(',', '.')) ?? 1;
-    final unitPrice =
-        double.tryParse(_priceCtl.text.replaceAll(',', '.')) ?? 0;
+    final unitPrice = parseMoney(_priceCtl.text) ?? 0;
     if (name.isEmpty || unitPrice <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Item name and a price are required.')),
@@ -1919,7 +2015,8 @@ class _DetailEditorSheetState extends State<_DetailEditorSheet> {
                       label: 'Unit price',
                       controller: _priceCtl,
                       c: c,
-                      numeric: true),
+                      numeric: true,
+                      money: true),
                 ),
               ],
             ),
@@ -1954,6 +2051,9 @@ class _SheetField extends StatelessWidget {
   final TextEditingController controller;
   final AppColors c;
   final bool numeric;
+
+  /// A money amount: grouped with dots as it is typed.
+  final bool money;
   final bool autofocus;
 
   const _SheetField({
@@ -1961,6 +2061,7 @@ class _SheetField extends StatelessWidget {
     required this.controller,
     required this.c,
     this.numeric = false,
+    this.money = false,
     this.autofocus = false,
   });
 
@@ -1972,9 +2073,11 @@ class _SheetField extends StatelessWidget {
       keyboardType: numeric
           ? const TextInputType.numberWithOptions(decimal: true)
           : TextInputType.text,
-      inputFormatters: numeric
-          ? [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))]
-          : null,
+      inputFormatters: money
+          ? moneyInputFormatters
+          : numeric
+              ? [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))]
+              : null,
       style: TextStyle(fontSize: 15, color: c.ink),
       decoration: InputDecoration(
         labelText: label,
